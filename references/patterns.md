@@ -52,6 +52,40 @@ Put inside the `prompt` string. **Always include all configured languages:**
 Use `say` for: brand intros, compliance lines, fixed closings, scripted questions.
 Do NOT `say`-wrap: adaptive probing, empathy, natural steering, value read-backs.
 
+### One block per language — multi-sentence lines stay together
+
+A scenario turn renders **at most one `<say>` per configured language**. A deterministic line made
+of several sentences goes inside a **single** block; splitting it into one block per sentence means
+only one of them survives.
+
+**WRONG** (three sentences, three same-language blocks):
+
+```
+<say lang="en-IN">Good morning.</say>
+<say lang="en-IN">This is Riya from Karnataka Bank.</say>
+<say lang="en-IN">Am I speaking with Mr. Sharma?</say>
+<say lang="hi-IN">Good morning.</say>
+<say lang="hi-IN">मैं Karnataka Bank से Riya बोल रही हूँ।</say>
+<say lang="hi-IN">क्या मैं Mr. Sharma से बात कर रही हूँ?</say>
+```
+
+**RIGHT** (one block per language):
+
+```
+<say lang="en-IN">Good morning. This is Riya from Karnataka Bank. Am I speaking with Mr. Sharma?</say>
+<say lang="hi-IN">Good morning. मैं Karnataka Bank से Riya बोल रही हूँ। क्या मैं Mr. Sharma से बात कर रही हूँ?</say>
+```
+
+Sentence boundaries are just punctuation inside the block — the TTS handles the pauses. Do not use
+`\n` or extra tags to force a break.
+
+The **only** place two `<say lang="en-IN">` blocks may coexist in one prompt is across mutually
+exclusive Jinja branches (see below), because a single branch renders. Within any one branch it is
+still exactly one block per language.
+
+If the scenario must speak twice with a tool call, a pause, or the customer's reply in between,
+that is **two scenarios**, not two say blocks.
+
 Variables can be interpolated inside say blocks:
 
 ```
@@ -185,6 +219,7 @@ Inya attaches tools to a scenario using `<tool_name>` tags at the end of the pro
 | `signal` on global transition                                        | Validator rejects it               | Only use `signal` on scenario transitions                  |
 | Two global transitions with same `go_to`                             | DUPLICATE_GOTO error               | Create separate target scenarios                           |
 | Say block missing a language                                         | LANGUAGE_MISMATCH error            | Include all configured languages in every say/cue          |
+| One `<say>` per sentence (3 sentences -> 3 same-`lang` blocks)       | Only one block is spoken; the rest of the line is silently lost | Put all sentences in a single `<say>` per language |
 | Missing `type: "single_prompt"`                                      | FE fails                           | Always include on every scenario                           |
 | Exploding extracted variables                                        | Debugging nightmare                | Only variables that route or cross a boundary              |
 | Repeating FAQ handling per scenario                                  | Bloat and inconsistency            | Use a global transition to a single FAQ handler            |

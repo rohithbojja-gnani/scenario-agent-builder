@@ -55,6 +55,13 @@ This is the platform contract for `bot_config.scenario_config`. Match it exactly
 | `extract`     | dict[str,string]          | no              | `variable_name -> extraction instruction`. Runs every turn.                                         |
 | `transitions` | array[ScenarioTransition] | no              | Ordered; first match wins. Empty `[]` = terminal scenario.                                          |
 
+### Say blocks in `prompt`
+
+A scenario turn renders **at most one `<say>` per configured language**. Multi-sentence deterministic
+lines belong inside a single `<say lang="...">` block — one `<say>` per sentence means only one of
+them is spoken. Same-language blocks may only repeat across mutually exclusive Jinja branches, since
+one branch renders. See `patterns.md` for examples.
+
 ### Tool attachment in scenarios
 
 Tools are scoped per scenario. To attach tools:

@@ -75,7 +75,42 @@ The validator rejects `signal` on `global_transitions`. Signals (`"signal": "end
 
 If the bot supports `["en-IN", "hi-IN"]`, then every `<say>` block must have both `lang="en-IN"` and `lang="hi-IN"` variants, and every `deterministic_exit_cue` must have both `"en-IN"` and `"hi-IN"` keys. Mismatched languages cause validation errors.
 
-### Rule 7: Jinja must use standard syntax only
+### Rule 7: One `<say>` block per language per spoken turn
+
+A deterministic line that runs to several sentences is **one** `<say>` block containing all of
+them — never one `<say>` per sentence. A scenario renders **at most one `<say>` per configured
+language** per turn; extra same-language blocks are dropped or cause a validation error.
+
+**WRONG** — three sentences split into three same-language blocks:
+
+```
+<say lang="en-IN">Good morning.</say>
+<say lang="en-IN">This is Riya from Karnataka Bank.</say>
+<say lang="en-IN">Am I speaking with Mr. Sharma?</say>
+<say lang="hi-IN">Good morning.</say>
+<say lang="hi-IN">मैं Karnataka Bank से Riya बोल रही हूँ।</say>
+<say lang="hi-IN">क्या मैं Mr. Sharma से बात कर रही हूँ?</say>
+```
+
+**RIGHT** — one block per language, all sentences inside it:
+
+```
+<say lang="en-IN">Good morning. This is Riya from Karnataka Bank. Am I speaking with Mr. Sharma?</say>
+<say lang="hi-IN">Good morning. मैं Karnataka Bank से Riya बोल रही हूँ। क्या मैं Mr. Sharma से बात कर रही हूँ?</say>
+```
+
+**The one exception — Jinja branches.** Several `<say lang="en-IN">` blocks may appear in the
+prompt *source* when they sit in mutually exclusive `{% if %}` / `{% elif %}` / `{% else %}`
+branches, because only one branch ever renders. The rule still holds inside each branch: exactly
+one `<say>` per language per branch.
+
+If the scenario genuinely needs to speak twice with something in between — a tool call, a pause,
+the customer's reply — that is **two scenarios**, not two say blocks.
+
+Keep sentence boundaries as normal punctuation inside the single block; the TTS handles the
+pauses. Do not use `\n` or separate tags to force a break.
+
+### Rule 8: Jinja must use standard syntax only
 
 The platform's Jinja validator does NOT have custom functions like `is_filled()`. Use only standard Jinja2:
 
@@ -89,19 +124,19 @@ The platform's Jinja validator does NOT have custom functions like `is_filled()`
 
 Never use `is_filled()`, `is_empty()`, or any custom function in Jinja templates.
 
-### Rule 8: Deterministic exit cues on every transition
+### Rule 9: Deterministic exit cues on every transition
 
 Every transition — both `when` (deterministic) and `when_llm` (AI-judged) — should have a bilingual `deterministic_exit_cue`. This prevents dead air during scenario handoffs. The cue is spoken instantly while the next scenario's LLM call runs in parallel.
 
-### Rule 9: Terminal scenarios use empty transitions
+### Rule 10: Terminal scenarios use empty transitions
 
 Scenarios that end the call have `"transitions": []`. The platform handles call termination when there are no outgoing transitions.
 
-### Rule 10: System variables must be declared
+### Rule 11: System variables must be declared
 
 The platform injects system variables at runtime, but they must be declared in `variables_schema` with `"source": "system"`. Always include: `current_time`, `current_date`, `current_day`, `current_timestamp`, `agent_gender`, `agent_personality`, `dialled_phone_number`, `conversation_id`.
 
-### Rule 11: Minimal extracted variables
+### Rule 12: Minimal extracted variables
 
 Create an `extracted` variable ONLY when:
 1. A **transition reads it** (it gates a `when` condition), or
@@ -109,7 +144,7 @@ Create an `extracted` variable ONLY when:
 
 If a fact is only used within one scenario's own turn, it stays in-context and gets NO variable.
 
-### Rule 12: Tool attachment via `<tool_name>` tags in prompt and `tools` array
+### Rule 13: Tool attachment via `<tool_name>` tags in prompt and `tools` array
 
 Tools are scoped per scenario. Every tool available in a scenario must be attached in two matching places:
 1. Listed in the scenario's `"tools"` array: `["search_place", "save_kundli"]`.
@@ -126,7 +161,7 @@ The `<tool_name>` tags in the prompt must match the tools in the `"tools"` array
 3. **Map the global layer.** Objections/FAQs -> global_transitions + handler scenarios.
 4. **Write `global_prompt`** from the single prompt's persona/tone/guardrail blocks. All keys snake_case.
 5. **Declare variables** — system vars (mandatory set), user_defined (CRM/pre-call), extracted (routing only).
-6. **Author each scenario**: `type`, `prompt` (with bilingual say blocks + Jinja + `<tool_name>` tags at the end for attached tools), `extract`, `transitions` (with bilingual cues), `tools` (array matching prompt tool tags).
+6. **Author each scenario**: `type`, `prompt` (with bilingual say blocks — **one `<say>` per language, multi-sentence lines kept inside that single block** — plus Jinja + `<tool_name>` tags at the end for attached tools), `extract`, `transitions` (with bilingual cues), `tools` (array matching prompt tool tags).
 7. **Self-validate** the JSON structure (see checklist below).
 
 ---
@@ -211,10 +246,11 @@ Before returning the JSON, verify ALL of these (do NOT call any external APIs):
 8. **Unique global go_to** — no two global transitions point to the same scenario.
 9. **No `signal` on global transitions** — only on scenario transitions.
 10. **Bilingual say blocks** — every `<say>` has variants for all configured languages; every `deterministic_exit_cue` has all language keys.
-11. **Jinja** uses only `is defined`, `is not defined`, `==`, `!=` with `\"escaped\"` strings. No custom functions.
-12. **System variables declared** — at minimum: `current_time`, `current_date`, `current_day`, `current_timestamp`, `agent_gender`, `agent_personality`, `dialled_phone_number`, `conversation_id`.
-13. **Every variable** referenced in Jinja (`{{ var }}`, `{% if var %}`) or in `when.var` or in `extract` keys is declared in `variables_schema`.
-14. **`deterministic_exit_cue`** present on every transition (both `when` and `when_llm`), bilingual.
-15. **Tool attachment** — every tool in a scenario's `tools` array has a matching `<tool_name>tool_name</tool_name>` tag at the end of its `prompt` in the exact same order. Scenarios without tools have `"tools": []` and no `<tool_name>` tags.
+11. **One say block per language** — no branch of a prompt contains two `<say>` blocks with the same `lang`. Multi-sentence lines live inside a single block. (Same-language blocks in *different* Jinja branches are fine, since only one branch renders.)
+12. **Jinja** uses only `is defined`, `is not defined`, `==`, `!=` with `\"escaped\"` strings. No custom functions.
+13. **System variables declared** — at minimum: `current_time`, `current_date`, `current_day`, `current_timestamp`, `agent_gender`, `agent_personality`, `dialled_phone_number`, `conversation_id`.
+14. **Every variable** referenced in Jinja (`{{ var }}`, `{% if var %}`) or in `when.var` or in `extract` keys is declared in `variables_schema`.
+15. **`deterministic_exit_cue`** present on every transition (both `when` and `when_llm`), bilingual.
+16. **Tool attachment** — every tool in a scenario's `tools` array has a matching `<tool_name>tool_name</tool_name>` tag at the end of its `prompt` in the exact same order. Scenarios without tools have `"tools": []` and no `<tool_name>` tags.
 
 State any assumptions made (e.g. "assumed bot languages are en-IN and hi-IN") in one line after the JSON.

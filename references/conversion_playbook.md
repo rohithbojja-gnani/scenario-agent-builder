@@ -77,7 +77,7 @@ Always `"single_prompt"`.
 ### `prompt`
 
 - Open with the step's behaviour description.
-- Use `<say lang="...">` for locked/scripted lines — always bilingual.
+- Use `<say lang="...">` for locked/scripted lines — always bilingual, and **one block per language**: a multi-sentence line goes inside a single `<say>`, never one `<say>` per sentence.
 - Use Jinja `{% if/elif/else %}` for conditional wording only (not routing).
 - Jinja string comparisons use `\"` escaping: `{% if var == \"value\" %}`.
 - Jinja existence checks use `is defined`: `{% if var is defined %}`.
@@ -115,7 +115,7 @@ Run the checklist from the main SKILL.md:
 7. global_prompt keys are snake_case.
 8. Global transition `go_to` targets are unique.
 9. No `signal` on global transitions.
-10. Bilingual say blocks and cues.
+10. Bilingual say blocks and cues — exactly one `<say>` per language per branch.
 11. Standard Jinja only (no `is_filled`, no custom functions).
 12. System variables declared.
 13. All referenced variables declared.
