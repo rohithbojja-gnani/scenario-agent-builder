@@ -202,6 +202,38 @@ Each scenario transition must have **exactly one** of `when` or `when_llm`:
 
 Both `go_to` and one of `when`/`when_llm` are required. Order transitions so the most specific/deterministic fire first.
 
+### Rule 14: Tool invocation and findings usage
+
+Tool **attachment** (Rule 12) and tool **invocation** are separate requirements. Attaching a tool makes it available; the prompt must also explicitly instruct the agent on when and how to use it.
+
+For every tool-enabled scenario, the generated prompt must:
+
+1. **Condition before calling** -- identify the prerequisite (e.g. a required variable must be available) and only call the tool when that condition is met.
+2. **Pass only required parameters** -- supply exactly the inputs the tool needs. Do not invent values or pass unnecessary fields.
+3. **Use findings as the source of truth** -- the tool response is authoritative. Use it to answer the user's specific question or perform the required action.
+4. **Answer only what was asked** -- do not dump the complete tool response. Share only the information relevant to the user's question.
+5. **Never expose raw responses** -- do not reveal raw JSON, internal field names, or implementation details to the customer.
+6. **Handle missing inputs** -- if a required input is not yet available, ask the user for it before calling the tool.
+7. **Handle tool failures** -- define explicit fallback behavior when the tool returns `success: false` or fails entirely (e.g. apologize and transfer, retry, or move to the next step).
+8. **Avoid duplicate calls** -- do not re-invoke the tool if the needed result has already been fetched and no refresh is required.
+
+Use this pattern in tool-enabled prompts:
+
+```text
+{% if required_variable is defined %}
+call tool <tool_name>TOOL_NAME</tool_name> with the required parameters
+
+Use the tool findings to answer the user's specific question or perform the required action.
+
+Do not expose the raw tool response. Provide only the relevant information.
+
+{% else %}
+ask the user for the required information before calling the tool
+{% endif %}
+```
+
+See the concrete `policy_details` example in the prompt structure section below.
+
 ---
 
 ## Prompt structure guidance: say blocks, if-else, and tool tags
@@ -233,6 +265,31 @@ A scenario prompt should follow this structure top-to-bottom:
 
 Use `<say>` for: brand intros, compliance lines, fixed closings, scripted questions, exact amounts/dates.
 Do NOT say-wrap: adaptive probing, empathy, natural steering, value read-backs where the LLM should paraphrase.
+
+### Tool invocation example: `policy_details`
+
+Below is a complete prompt for a tool-enabled scenario. It demonstrates conditional invocation, findings usage, failure handling, and correct `<tool_name>` tag placement:
+
+```text
+{% if selected_policy is defined %}
+call tool <tool_name>policy_details</tool_name> with policy set to {{selected_policy}}
+
+Use the policy_details findings to answer the user's specific question.
+
+Do NOT ask for the policy number again.
+
+Do NOT provide the complete policy_details response. Share only the information relevant to the user's question.
+
+If policy_details returns success as false or fails, move to agent transfer.
+
+{% else %}
+ask the user which policy they need help with before calling policy_details
+{% endif %}
+
+<tool_name>policy_details</tool_name>
+```
+
+Note: the final `<tool_name>policy_details</tool_name>` at the end satisfies the tool-attachment convention (Rule 12). The `<tool_name>` reference inside the Jinja block is the invocation instruction telling the LLM when and how to call the tool (Rule 14). Both are required.
 
 ### Global prompt structure
 
@@ -349,12 +406,13 @@ Before returning the JSON, verify ALL of these (do NOT call any external APIs or
 14. **Every variable** referenced in Jinja (`{{ var }}`, `{% if var %}`) or in `when.var` or in `extract` keys is declared in `variables_schema`.
 15. **`deterministic_exit_cue`** present on every transition (both `when` and `when_llm`), bilingual.
 16. **Tool attachment** -- every tool in a scenario's `tools` array has a matching `<tool_name>tool_name</tool_name>` tag at the end of its `prompt` in the exact same order. Scenarios without tools have `"tools": []` and no `<tool_name>` tags.
-17. **Identifier lengths** -- all scenario keys, variable names, transition names, extra global_prompt keys are 3-64 chars, matching `^[a-z][a-z0-9_]{2,63}$`.
-18. **Variable descriptions** -- max 256 chars each.
-19. **Variable count** -- max 100 total across all sources.
-20. **Condition limits** -- `when` nesting max 2 levels deep; max 10 leaves per `and`/`or` group.
-21. **Transition conditions** -- each scenario transition has exactly one of `when` or `when_llm` (not both, not neither).
-22. **Say blocks inside if-else** -- `<say>` tags go inside `{% if/elif/else %}` branches, with all languages in every branch.
-23. **Prompt layout** -- behaviour description first, then conditional/unconditional say blocks, then `<tool_name>` tags at the very end.
+17. **Tool invocation and findings** -- every tool-enabled scenario's prompt explicitly defines: (a) the condition required before calling the tool, (b) the required tool input, (c) how findings should be used (source of truth, answer only what was asked, no raw response exposure), and (d) failure/fallback behavior. Scenarios without tools are not affected by this check.
+18. **Identifier lengths** -- all scenario keys, variable names, transition names, extra global_prompt keys are 3-64 chars, matching `^[a-z][a-z0-9_]{2,63}$`.
+19. **Variable descriptions** -- max 256 chars each.
+20. **Variable count** -- max 100 total across all sources.
+21. **Condition limits** -- `when` nesting max 2 levels deep; max 10 leaves per `and`/`or` group.
+22. **Transition conditions** -- each scenario transition has exactly one of `when` or `when_llm` (not both, not neither).
+23. **Say blocks inside if-else** -- `<say>` tags go inside `{% if/elif/else %}` branches, with all languages in every branch.
+24. **Prompt layout** -- behaviour description first, then conditional/unconditional say blocks, then `<tool_name>` tags at the very end.
 
 State any assumptions made (e.g. "assumed bot languages are en-IN and hi-IN") in one line after the JSON.
