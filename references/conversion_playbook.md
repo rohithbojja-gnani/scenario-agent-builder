@@ -32,7 +32,7 @@ Heuristics:
 - **Abuse** → an `abuse_closure` terminal scenario.
 - **DND / don't call again** → a `dnd_closure` terminal scenario.
 - **Wrong number** → a `wrong_number` terminal scenario.
-- **Third party** → a `third_party` scenario to ask about availability.
+- **Talk to a human / force transfer** → for **tool-calling** bots: do **not** add a broad `agent_transfer_request` global transition. Instruct guardrails/scenarios to **call the backend transfer tool with no spoken filler** (platform plays the connecting message). Never author `| TTA` text for tool-calling models. Only use a dedicated `agent_transfer` scenario if you truly need a transition target — and even then, prompt must only invoke the transfer tool, no LLM-generated connecting filler.
 
 **Critical rule: each global transition must have a UNIQUE `go_to` target.** If abuse and DND both need terminal scenarios, create separate ones.
 

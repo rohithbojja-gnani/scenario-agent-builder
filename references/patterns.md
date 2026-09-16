@@ -226,7 +226,9 @@ Inya attaches tools to a scenario using `<tool_name>` tags at the end of the pro
 | Language-variant variables (`amount_eng`/`amount_hin`)               | Naming drift                       | One base variable; language at speak time                  |
 | Declaring tools in `tools` but omitting `<tool_name>` tags in prompt | Tools not attached in runtime      | Append `<tool_name>tool_name</tool_name>` tags to prompt   |
 | `<tool_name>` tags in prompt do not match `tools` array order        | Tool tag validation failure        | Match the exact order of tools in `tools` array            |
-| `when_llm` in routing scenario requiring multi-turn info gathering   | Turn 2 ("ji haan") doesn't match "caller asks about X" — no transition fires, LLM calls TTA | Extract intent as a variable + use deterministic `when` conditions (Rule 14) |
+| `when_llm` in routing scenario requiring multi-turn info gathering   | Turn 2 ("ji haan") doesn't match "caller asks about X" — no transition fires, LLM calls TTA | Extract intent as a variable + use deterministic `when` conditions (Rule 15) |
+| Broad `global_transitions` TTA catch-all (cancel/surrender/docs/…) | Global interrupt fires before scenario routes; premature TTA | Put out-of-scope rules in guardrails; call backend transfer tool in-place (Rule 16) |
+| LLM speaks connecting filler then calls transfer tool / emits `\| TTA` | Double filler or wrong TTA path for tool-calling models | Call transfer tool only; no spoken filler; never `\| TTA` (Rule 16) |
 | Entity extraction that doesn't recognize bare confirmations          | `selected_policy` never extracted when user says "yes" to confirm | Include "or by confirming (yes, haan, ji haan, theek hai, etc.)" in extraction instruction |
 
 ## Split-turn intent routing pattern (Rule 14)

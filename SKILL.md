@@ -214,7 +214,7 @@ For every tool-enabled scenario, the generated prompt must:
 4. **Answer only what was asked** -- do not dump the complete tool response. Share only the information relevant to the user's question.
 5. **Never expose raw responses** -- do not reveal raw JSON, internal field names, or implementation details to the customer.
 6. **Handle missing inputs** -- if a required input is not yet available, ask the user for it before calling the tool.
-7. **Handle tool failures** -- define explicit fallback behavior when the tool returns `success: false` or fails entirely (e.g. apologize and transfer, retry, or move to the next step).
+7. **Handle tool failures** -- define explicit fallback behavior when the tool returns `success: false` or fails entirely. For tool-calling bots with a backend transfer tool: **call the transfer tool with no spoken filler** (do not say connecting/hold text and do not emit `| TTA`).
 8. **Avoid duplicate calls** -- do not re-invoke the tool if the needed result has already been fetched and no refresh is required.
 
 Use this pattern in tool-enabled prompts:
@@ -281,6 +281,41 @@ In natural conversation these are almost always split across turns:
 **Key extraction instruction patterns for confirmations:** The entity extraction (e.g. `selected_policy`) must recognize confirmations. Include phrasing like: _"...or by confirming (yes, haan, ji haan, theek hai, etc.) when asked about a specific entity."_
 
 **Rule of thumb:** If a routing scenario has `"tools": []` and its transitions depend on info the caller might split across turns, **always** use extracted variables + deterministic `when` conditions. Reserve `when_llm` for transitions where the full trigger is expressed in a single turn (e.g. mid-flow topic switches in downstream scenarios).
+
+### Rule 16: Agent transfer (TTA) — tool call, no spoken filler, no broad global transition
+
+**Root cause (production incident):** A broad `global_transitions.agent_transfer_request` with `when_llm` covering cancel/surrender/documents/etc. fires **before** scenario-level transitions. The caller says "first policy cancel karna hai", the global interrupt wins, and the call jumps to `agent_transfer` / TTA without running the intended flow (or even the deterministic `when` routes).
+
+**Platform facts:**
+
+1. For **tool-calling enabled models**, the backend injects a **transfer / TTA tool**. Agent transfer MUST be done by **calling that tool**, not by emitting `| TTA` in spoken text.
+2. `| TTA` in response text is the **legacy path for non-tool-calling models** only. Never author scenario prompts that tell the LLM to say `| TTA`.
+3. The platform already plays the connecting filler (often from `tta_msg`, e.g. "Please hold… connecting you to an agent"). The LLM must **not** invent a second connecting/hold message before or after the tool call — that doubles filler and sounds broken.
+
+**Do this:**
+
+```text
+# In guardrails / out-of-scope / tool-failure paths:
+call the transfer tool immediately with no spoken filler.
+
+# Never:
+tell the caller you are connecting them / please hold / speak {{tta_msg}} / output | TTA
+```
+
+**Global transitions:**
+
+- Prefer **no** `agent_transfer_request` global transition when the bot uses the backend transfer tool. Put out-of-scope / force-transfer rules in `global_prompt.guardrails` and scenario prompts so the LLM calls the transfer tool in-place.
+- Keep global transitions for true cross-cutting flows that need a dedicated scenario (e.g. `end_conversation` → `call_closure`), not for "anything hard → TTA".
+- If you still keep an `agent_transfer` scenario, its prompt must only say: call the transfer tool, no spoken filler — no hardcoded EN/HI connecting lines.
+
+**Checklist for TTA-capable bots:**
+
+| Item | Correct | Wrong |
+|---|---|---|
+| How to transfer | Call backend transfer tool | Speak `\| TTA` or `{{tta_msg}}` |
+| Spoken text on transfer | None (platform plays filler) | LLM invents "connecting you…" |
+| Broad cancel/surrender catch-all | Guardrails + transfer tool | Global `when_llm` → `agent_transfer` |
+| Explicit "speak to agent" | Ask why first; transfer tool only if insist | Instant global interrupt |
 
 ---
 
@@ -463,5 +498,6 @@ Before returning the JSON, verify ALL of these (do NOT call any external APIs or
 23. **Say blocks inside if-else** -- `<say>` tags go inside `{% if/elif/else %}` branches, with all languages in every branch.
 24. **Prompt layout** -- behaviour description first, then conditional/unconditional say blocks, then `<tool_name>` tags at the very end.
 25. **Split-turn routing** -- if the `start` or any dispatch scenario gathers info across turns (e.g. identify entity + confirm), it MUST use extracted variables + deterministic `when` conditions, NOT `when_llm`. Extraction instructions must say "extract from full conversation context" and "once set, keep the same value unless the caller explicitly changes topic." Entity extraction must recognize bare confirmations (yes/haan/ji haan/theek hai).
+26. **TTA / agent transfer** -- for tool-calling models: transfer via the backend-injected transfer tool only; never `| TTA` in spoken text; never invent connecting/hold filler (platform plays it). Do not use a broad `global_transitions` catch-all that interrupts cancel/surrender/etc. before scenario routes can run.
 
 State any assumptions made (e.g. "assumed bot languages are en-IN and hi-IN") in one line after the JSON.
