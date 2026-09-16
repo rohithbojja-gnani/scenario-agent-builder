@@ -234,6 +234,54 @@ ask the user for the required information before calling the tool
 
 See the concrete `policy_details` example in the prompt structure section below.
 
+### Rule 15: Split-turn intent — use deterministic `when` for routing/dispatch scenarios
+
+**Root cause (production incident):** A `when_llm` condition like _"The policy is known and the caller asks about nominee"_ fails when the caller expresses intent in Turn 1 and confirms the policy in Turn 2 with just "जी हाँ" (yes). The LLM evaluates `when_llm` primarily against the **current utterance**, so a bare confirmation doesn't match "asks about nominee." No transition fires, the engine stays in the toolless routing scenario, and the LLM falls back to TTA (agent transfer) — the only available tool.
+
+**When this applies:** Any routing/dispatch scenario (typically the `start` scenario) that must gather TWO pieces of information before routing:
+
+1. **What** the caller wants (topic/intent)
+2. **Which** entity it's about (policy, account, product, order)
+
+In natural conversation these are almost always split across turns:
+
+| Turn | Caller says | Intent | Entity |
+|---|---|---|---|
+| 1 | "मेरे पहले पॉलिसी का नॉमिनी नेम बताइए" | ✅ nominee | ❌ unconfirmed |
+| 2 | "जी हाँ" (confirming policy 5485) | (from Turn 1) | ✅ confirmed |
+
+**The fix:** Extract both pieces as variables and use deterministic `when` conditions instead of `when_llm`:
+
+1. **Add an extracted intent variable** with a description that explicitly says to extract from full conversation context, not just the current turn, and to persist the value once set:
+
+```json
+"extract": {
+  "selected_policy": "...set when the caller identifies or confirms a policy...",
+  "user_intent": "Set to exactly one of: 'policy', 'premium', 'nominee', 'fund', 'claim', 'bank'. Extract from the full conversation context — the caller may state their intent in one turn and confirm the entity in a later turn. Once set, keep the same value unless the caller explicitly changes topic."
+}
+```
+
+2. **Use `when` conditions** that gate on BOTH variables:
+
+```json
+{
+  "when": {
+    "and": [
+      {"var": "selected_policy", "op": "EXISTS", "value": null},
+      {"var": "user_intent", "op": "EQUALS", "value": "nominee"}
+    ]
+  },
+  "go_to": "nominee_info",
+  "deterministic_exit_cue": { "en-IN": "Sure, let me check the nominee details.", "hi-IN": "ज़रूर, मैं nominee details check करती हूँ।" }
+}
+```
+
+**Why this works:** Extracted variables persist across turns within the same scenario. `user_intent = "nominee"` is set in Turn 1 and remains when Turn 2 extracts `selected_policy`. Both conditions are then met deterministically — no LLM interpretation needed.
+
+**Key extraction instruction patterns for confirmations:** The entity extraction (e.g. `selected_policy`) must recognize confirmations. Include phrasing like: _"...or by confirming (yes, haan, ji haan, theek hai, etc.) when asked about a specific entity."_
+
+**Rule of thumb:** If a routing scenario has `"tools": []` and its transitions depend on info the caller might split across turns, **always** use extracted variables + deterministic `when` conditions. Reserve `when_llm` for transitions where the full trigger is expressed in a single turn (e.g. mid-flow topic switches in downstream scenarios).
+
 ---
 
 ## Prompt structure guidance: say blocks, if-else, and tool tags
@@ -414,5 +462,6 @@ Before returning the JSON, verify ALL of these (do NOT call any external APIs or
 22. **Transition conditions** -- each scenario transition has exactly one of `when` or `when_llm` (not both, not neither).
 23. **Say blocks inside if-else** -- `<say>` tags go inside `{% if/elif/else %}` branches, with all languages in every branch.
 24. **Prompt layout** -- behaviour description first, then conditional/unconditional say blocks, then `<tool_name>` tags at the very end.
+25. **Split-turn routing** -- if the `start` or any dispatch scenario gathers info across turns (e.g. identify entity + confirm), it MUST use extracted variables + deterministic `when` conditions, NOT `when_llm`. Extraction instructions must say "extract from full conversation context" and "once set, keep the same value unless the caller explicitly changes topic." Entity extraction must recognize bare confirmations (yes/haan/ji haan/theek hai).
 
 State any assumptions made (e.g. "assumed bot languages are en-IN and hi-IN") in one line after the JSON.

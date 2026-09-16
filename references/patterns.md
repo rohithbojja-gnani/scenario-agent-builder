@@ -226,3 +226,67 @@ Inya attaches tools to a scenario using `<tool_name>` tags at the end of the pro
 | Language-variant variables (`amount_eng`/`amount_hin`)               | Naming drift                       | One base variable; language at speak time                  |
 | Declaring tools in `tools` but omitting `<tool_name>` tags in prompt | Tools not attached in runtime      | Append `<tool_name>tool_name</tool_name>` tags to prompt   |
 | `<tool_name>` tags in prompt do not match `tools` array order        | Tool tag validation failure        | Match the exact order of tools in `tools` array            |
+| `when_llm` in routing scenario requiring multi-turn info gathering   | Turn 2 ("ji haan") doesn't match "caller asks about X" — no transition fires, LLM calls TTA | Extract intent as a variable + use deterministic `when` conditions (Rule 14) |
+| Entity extraction that doesn't recognize bare confirmations          | `selected_policy` never extracted when user says "yes" to confirm | Include "or by confirming (yes, haan, ji haan, theek hai, etc.)" in extraction instruction |
+
+## Split-turn intent routing pattern (Rule 14)
+
+The most common routing pattern for inbound bots: the caller says WHAT they want and WHICH entity
+in different turns. The `start` scenario must track both across turns and route deterministically.
+
+### The problem (real production incident — BALIC)
+
+```
+Turn 1: "मेरे पहले पॉलिसी का नॉमिनी नेम बताइए"  →  intent=nominee, policy=unconfirmed
+Turn 2: "जी हाँ"  (confirming policy 5485)           →  intent=nominee, policy=confirmed
+```
+
+With `when_llm: "The policy is known and the caller asks about nominee"`:
+- Turn 2 utterance is just "जी हाँ" — LLM does not match "asks about nominee"
+- No transition fires → stays in `call_start` (which has `tools: []`)
+- LLM's only tool is TTA → call transferred to agent, nominee_details never called
+
+### The correct pattern
+
+**variables_schema:**
+
+```json
+"selected_policy": { "source": "extracted", "description": "Full policy number currently in focus." },
+"user_intent": { "source": "extracted", "description": "The caller's topic: policy, premium, nominee, fund, claim, or bank." }
+```
+
+**extract (in the routing scenario):**
+
+```json
+"extract": {
+  "selected_policy": "...by last four digits, product name, product type, ordinal reference, or by confirming (yes, haan, ji haan, theek hai, etc.) when asked about a specific policy. Leave unset until unambiguous.",
+  "user_intent": "Set to exactly one of: 'policy', 'premium', 'nominee', 'fund', 'claim', 'bank'. Extract from the full conversation context — the caller may state intent in one turn and confirm the entity in a later turn. Once set, keep the same value unless the caller explicitly changes topic."
+}
+```
+
+**transitions (deterministic `when`, NOT `when_llm`):**
+
+```json
+"transitions": [
+  {
+    "when": {
+      "and": [
+        {"var": "selected_policy", "op": "EXISTS", "value": null},
+        {"var": "user_intent", "op": "EQUALS", "value": "nominee"}
+      ]
+    },
+    "go_to": "nominee_info",
+    "deterministic_exit_cue": { "en-IN": "Sure, let me check the nominee details.", "hi-IN": "ज़रूर, मैं nominee details check करती हूँ।" }
+  }
+]
+```
+
+**Why it works:**
+- Turn 1: `user_intent = "nominee"` extracted. `selected_policy` unset → transition doesn't fire (correct).
+- Turn 2: `selected_policy` extracted from confirmation. `user_intent` persists from Turn 1 → both conditions met → transition fires deterministically.
+
+**Key details:**
+- The intent extraction instruction must say **"extract from full conversation context"** — not just the current turn.
+- The entity extraction must list **bare confirmations** (yes/haan/ji haan/theek hai) as valid identification methods.
+- The intent extraction must say **"once set, keep the same value"** so it persists across turns.
+- One transition per intent value, all gated on entity EXISTS + intent EQUALS.

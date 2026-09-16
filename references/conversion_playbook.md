@@ -98,6 +98,8 @@ Always `"single_prompt"`.
 - Put most specific/deterministic transitions first.
 - Terminal scenarios: `"transitions": []`.
 
+**Split-turn intent (CRITICAL for routing/dispatch scenarios):** If this scenario gathers TWO pieces of info before routing (e.g. which entity + what topic), callers will almost always split them across turns — stating intent first, then confirming the entity. You MUST use extracted variables + deterministic `when` conditions here, NOT `when_llm`. A `when_llm` like "the caller asks about X" will fail on a bare confirmation turn ("ji haan") because the current utterance doesn't mention the topic. See Rule 14 in SKILL.md and the split-turn pattern in `patterns.md`.
+
 ### `tools`
 
 - Array of tool name strings matching the `<tool_name>` tags in `prompt` in name and order. Empty `[]` if no tools.
@@ -132,5 +134,6 @@ Pick 6-10 representative customer inputs and trace both versions:
 - An FAQ mid-flow.
 - An edge case the single prompt guarded.
 - A wrong number / DND.
+- **A split-turn intent test:** user states intent in Turn 1 (e.g. "tell me my nominee name"), bot asks for entity confirmation, user gives a bare confirmation in Turn 2 (e.g. "ji haan" / "yes"). Verify the transition fires and the correct tool is called — this is the most common failure mode for routing scenarios that use `when_llm` instead of deterministic `when`.
 
 If the scenario version answers as well or better on each, you're done.
