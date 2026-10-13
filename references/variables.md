@@ -1,96 +1,85 @@
-# Variables — Sources, System Variables, Minimal Extraction, Canonical Names
+# Variables (version 2): sources, types, minimal extraction, canonical names
 
-## The three sources
+## Sources
 
-- **system** — auto-populated by the platform at call start. Must be declared in `variables_schema` with `"source": "system"`.
-- **user_defined** — known before the call: CRM/contact fields and fixed values. The single prompt's `{{...}}` values map here.
-- **extracted** — produced during the call by a scenario's `extract`. Carries state across scenario boundaries.
+| Source | Who sets it | Type | Updated by the model |
+|---|---|---|---|
+| `system` | The platform, at call start | `text` | Never (`SYSTEM_VARIABLE_UPDATE`) |
+| `user_defined` | Supplied with each call (campaign/CRM data, fixed values) | `text` | Allowed, for corrections |
+| `extracted` | Captured from the conversation via `<update>` or a waiting If | `text`, `number`, `decimal`, `boolean`, `enum` | Yes |
 
-## Required system variables (always declare these)
+## System variables
 
-These must be declared in every `variables_schema` to avoid `VARIABLE_MISSING` / `UNKNOWN_SYSTEM_VARIABLE` errors:
+Exactly these nine exist; declare the ones you use (type `text`):
 
 ```json
-"variables_schema": {
-  "current_time":           { "source": "system", "description": "Current time during the turn (e.g. 12:00 PM)." },
-  "current_date":           { "source": "system", "description": "Today's date (e.g. 12 July 2026)." },
-  "current_day":            { "source": "system", "description": "Day of the week (e.g. Friday)." },
-  "current_timestamp":      { "source": "system", "description": "Full date+time with offset." },
-  "agent_gender":           { "source": "system", "description": "Gender of the TTS voice (Male/Female)." },
-  "agent_personality":      { "source": "system", "description": "Personality of the agent voice." },
-  "dialled_phone_number":   { "source": "system", "description": "Phone number dialled for this call." },
-  "conversation_id":        { "source": "system", "description": "Unique identifier for this conversation." }
-}
+"agent_name":           {"source": "system", "type": "text", "description": "Name of the AI agent."},
+"agent_gender":         {"source": "system", "type": "text", "description": "Gender of the agent voice (Male or Female)."},
+"agent_personality":    {"source": "system", "type": "text", "description": "Personality of the voice persona."},
+"current_date":         {"source": "system", "type": "text", "description": "Today's date at call start."},
+"current_day":          {"source": "system", "type": "text", "description": "Day of the week at call start."},
+"current_time":         {"source": "system", "type": "text", "description": "Time at call start."},
+"current_timestamp":    {"source": "system", "type": "text", "description": "Full timestamp at call start, for date maths."},
+"dialled_phone_number": {"source": "system", "type": "text", "description": "Phone number dialled for this call."},
+"conversation_id":      {"source": "system", "type": "text", "description": "Unique conversation ID."}
 ```
 
-Only declare the ones the agent actually references or needs. If a variable is referenced in Jinja (`{{ current_date }}`), it MUST be declared. If not referenced anywhere, it's safe to omit. When in doubt, include the full set above.
+Anything else that arrives with the call (amounts, names, dates, account data, a "today" field from the campaign)
+is `user_defined`. Don't declare a second "today" variable: use `current_date`.
 
-Additional system variables available when campaign manager is active:
-- `outbound_attempt_number`, `outbound_connected_attempt_number`, `call_direction`, `channel`, `last_disposition`.
+## Choosing a type for an extracted variable
 
-## Rule: MINIMAL extracted variables
+| Value | Type | Notes |
+|---|---|---|
+| Yes/no fact or "line already said" flag | `boolean` | Conditions use `EQUALS true/false` only. `yes`/`no` are not accepted values |
+| One of 2 to 10 categories | `enum` | Options: letters, digits, space, `_`, `-`; ≤ 64 characters; not number- or boolean-looking (`tier1`, not `1`) |
+| A code with more than 10 possible values (e.g. call dispositions) | `text` | List the codes in a global prompt section and say "exactly one of the codes" in the description |
+| Dates, times, names, free amounts as spoken | `text` | State the format: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM` |
+| Whole numbers compared with GREATER/LESS | `number` | EQUALS needs a whole number |
+| Amounts with decimals compared in conditions | `decimal` | |
 
-Create an `extracted` variable **only if** at least one of:
-1. A **transition reads it** (it gates a `when` condition), or
-2. The **next scenario genuinely needs the value** (crosses a scenario boundary).
+## Descriptions
 
-If a fact is only used within one scenario's own turn — tone, which rebuttal was used, soft acknowledgements — it stays in-context and gets NO variable.
+The description is shown every time the model is asked to report the variable. Make it say what the value is,
+in one sentence, ≤ 256 characters. Put per-scenario guidance (when to report it here) in the scenario text next to
+the `<update>`, not in the description.
 
-### Naming extracted routing flags
-- Prefer null-until-set flags tested with `EXISTS`: e.g. `identity_confirmed` tested with `{"var": "identity_confirmed", "op": "EXISTS"}`.
-- Use `EQUALS`/`NOT_EQUALS` only for genuine enums: e.g. `{"var": "is_employed", "op": "EQUALS", "value": "true"}`.
-- Extraction values are always **strings**: `"true"`, `"false"`, `"accepted"`, `"declined"`, `"not_eligible"`.
+## Minimal extraction
 
-### Typical good extracted sets (by agent type):
+Create an `extracted` variable only if:
+1. a condition reads it (it routes the call), or
+2. another scenario needs the value, or
+3. it is a required output of the call (disposition, committed date/amount/mode, callback time).
 
-**Identity/greeting:** `identity_confirmed`, `is_third_party`
-**Eligibility routing:** `is_employed`, `has_epf`, `has_official_email`
-**Payment/booking:** `payment_date`, `payment_mode`, `payment_confirmed`
-**Consent:** `sms_consent`, `callback_time`
-**Control:** `rebuttal_done`, `rebuttal_outcome`, `call_outcome`, `wants_to_end`
+A fact used only within one scenario's own turn stays in the conversation. Target 10–25 extracted variables for a
+large agent; well over that usually means "line already said" bookkeeping that the history or the flow already
+covers.
 
-Target: 10-20 extracted variables for a large agent. If past ~25, you're over-extracting.
+## Reporting rules worth stating in scenarios
 
-## Canonical names (enforce; collapse language variants)
+- "Report it on the turn it becomes true; never report a value you don't have."
+- For flags about lines said in the first reply after a move: "report it on the customer's next turn, including
+  when it was said as this scenario started".
+- Stable identifiers: update them only where they can change (not in every scenario).
 
-| Concept | Canonical | Never use |
+## Canonical names
+
+| Concept | Name | Never |
 |---|---|---|
 | Today's date | `current_date` | today_date, todays_date, date_today |
 | Customer name | `customer_name` or `full_name` | name, customer_full_name |
 | Phone | `phone_number` | mobile, mob, rmn |
 | Loan account | `loan_id` | loan_account_number |
-| Amount fields | `due_amount`, `total_loan_amount` | due_amount_eng/hin |
+| Amounts | `due_amount`, `total_loan_amount` | due_amount_eng / due_amount_hin |
 | Agent name | `agent_name` | bot_name, assistant_name |
 
-Collapse every `_eng` / `_hin` / `_tam` variant to the single base name. Language is handled at speak time, not via separate variables.
+Collapse every `_eng` / `_hin` language variant into one base name unless the campaign really supplies separate
+spoken forms (then keep `x_english` and `x_translated` and say which one each language uses).
 
-## Variable definition shape in output
+## Domain packs (user_defined, all `text`)
 
-```json
-"variables_schema": {
-  "customer_name":        { "source": "user_defined", "description": "Full name of the customer." },
-  "agent_name":           { "source": "user_defined", "description": "Name of the AI agent." },
-  "current_date":         { "source": "system",       "description": "Today's date." },
-  "current_time":         { "source": "system",       "description": "Current time." },
-  "current_day":          { "source": "system",       "description": "Day of the week." },
-  "current_timestamp":    { "source": "system",       "description": "Full timestamp." },
-  "agent_gender":         { "source": "system",       "description": "Gender of the TTS voice." },
-  "agent_personality":    { "source": "system",       "description": "Personality of the agent." },
-  "dialled_phone_number": { "source": "system",       "description": "Number dialled for this call." },
-  "conversation_id":      { "source": "system",       "description": "Unique conversation ID." },
-  "is_employed":          { "source": "extracted",    "description": "Whether customer is employed. 'true' or 'false'." },
-  "callback_time":        { "source": "extracted",    "description": "When the customer wants to be called back." }
-}
-```
-
-## Domain suggestion packs (offer when authoring)
-
-### Universal core (every agent)
-- **Customer Info (user_defined):** `customer_name`, `first_name`, `phone_number`, `customer_type`, `gender`, `city`, `preferred_language`, `agent_name`, `callback_time`.
-- **System:** the required system set above.
-
-### Collections / lending pack (user_defined)
-`loan_id`, `loan_type`, `total_loan_amount`, `tenure`, `no_of_loans`, `bank_name`, `nach_status`, `last_4_digits`, `due_date`, `due_amount`, `emi_amount`, `due_days`, `due_month`, `total_overdue`, `total_due_amount`, `dpd`, `penalty_amount`, `bounce_charges`, `min_partial_amount`, `settlement_amount`, `last_payment_amount`, `last_payment_date`, `mode_of_payment`, `salary_date`, `commit_date`.
-
-### Insurance pack (user_defined)
-`current_insurer`, `current_plan_name`, `sum_insured`, `annual_premium`, `renewal_date`, `policy_number`, `policy_type`, `family_members_covered`.
+- **Core**: `customer_name`, `first_name`, `phone_number`, `customer_type`, `gender`, `city`, `preferred_language`,
+  `callback_time`.
+- **Collections / lending**: `loan_id`, `loan_type`, `total_loan_amount`, `tenure`, `bank_name`, `due_date`,
+  `due_amount`, `emi_amount`, `dpd`, `total_overdue`, `settlement_amount`, `last_payment_amount`, `last_payment_date`.
+- **Insurance**: `policy_number`, `policy_type`, `current_insurer`, `sum_insured`, `annual_premium`, `renewal_date`.

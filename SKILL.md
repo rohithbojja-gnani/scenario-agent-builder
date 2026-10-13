@@ -1,503 +1,145 @@
 ---
 name: scenario-agent-builder
 description: >
-  Convert a single-prompt voice agent into a scenario-based agent JSON, or author one from scratch.
-  Use whenever the user provides a single-prompt voice bot and asks to migrate, convert, or
-  "make it scenario based"; or asks to design a scenario_config JSON with global_prompt,
-  global_transitions, scenarios, transitions, say blocks, extracted variables, etc.
-  Outputs a complete, validator-safe scenario_config JSON.
+  Build or convert scenario-based voice agents in the scenario_config version 2 format (one XML-ish string per
+  scenario, typed variables, one-line `when` conditions, global interrupts). Use when the user gives a
+  single-prompt voice bot, a version 1 scenario_config (scenario objects with prompt/extract/transitions, Jinja,
+  `<say lang>`), or a description, and asks to convert, migrate, "make it scenario based", or author a scenario
+  agent. Outputs a complete scenario_config that passes the bot builder, the save-time validator and the runtime.
 ---
 
-# Scenario-Based Voice Agent Builder
-
-## IMPORTANT: Agent efficiency rules
-
-This skill must execute with **minimal resource usage**:
-
-- **Do NOT spawn subagents or use the Task tool.** Perform the entire conversion in a single pass within the main agent context.
-- **Read reference files selectively.** Always read `references/schema.md` before writing JSON. Read `references/conversion_playbook.md` only for complex single-prompt-to-scenario conversions. Read `references/variables.md` and `references/patterns.md` only when the conversion involves unfamiliar variable patterns or say-block structures.
-- **Do NOT call external APIs** to validate the generated JSON. Use only the self-validation checklist in this file.
-- **Output the JSON in one shot.** Do not iterate through multiple drafts or verification passes with tool calls.
-
----
-
-## What this does
-
-Turns a **single giant prompt** voice agent into the **scenario-based framework**: many small reactive
-scenarios the platform connects, instead of one prompt carrying all the routing. The conversion must be
-**parity-or-better** -- the scenario agent must respond at least as well as the single prompt.
-
-Reference files (read selectively, not all at once):
-- `references/schema.md` -- the authoritative `scenario_config` JSON schema. **Load before writing any JSON.**
-- `references/conversion_playbook.md` -- step-by-step method to decompose a single prompt into scenarios.
-- `references/variables.md` -- canonical variable names, sources, system variables, and the "minimal extracted variables" rule.
-- `references/patterns.md` -- say blocks, Jinja, cues, global transitions, and anti-patterns from real migrations.
-
----
-
-## Tool context: ask for bot_config when available
-
-When the user provides or can provide the full `bot_config` (including the `actions` array listing all available tools), **ask for it** or include it in context. This enables:
-- Correct per-scenario tool scoping using `<tool_name>` tags.
-- Validation that tool names in `tools` arrays actually exist in the bot's action catalog.
-- Proper `<tool_name>` tag placement at the end of scenario prompts.
-
-Without the bot_config tool list, the skill cannot verify tool names. In that case, use whatever tool names the user provides or mentions in the single prompt, and note the assumption.
-
----
-
-## The mental model
-
-An agent = **one building block, the scenario**. A scenario is reactive: it generates output in response to
-the customer's turn. The FDE authors *what a scenario says and decides*; the **platform owns** how scenarios
-connect and how the call runs.
-
-Top-level object (`scenario_config`):
-- `name` (string) -- identifier for the config. Required by the FE.
-- `start` (string, required) -- the entry scenario key. Must be a valid identifier.
-- `global_prompt` (object) -- persona / context / conversation_style / guardrails, applied to every scenario. **Keys must be snake_case** (lowercase + underscores, 3-64 chars).
-- `variables_schema` (dict) -- each var has a `source`: `system` | `user_defined` | `extracted`, plus a `description`.
-- `global_transitions` (dict) -- cross-cutting handlers checked every turn before scenario transitions.
-- `scenarios` (dict) -- the scenarios; each has `type`, `prompt`, optional `tools`, `extract`, `transitions`.
-
----
-
-## Validation limits quick-reference
-
-These limits are enforced by both the FE and backend_v1. Violating any of them causes a validation error.
-
-| Constraint | Limit | Notes |
-|---|---|---|
-| Identifier regex | `^[a-z][a-z0-9_]{2,63}$` | Applies to: scenario keys, variable names, global transition names, extra global_prompt keys. Must start with lowercase letter. |
-| Identifier length | 3-64 chars | Too short (1-2 chars) or too long (65+) rejected. |
-| global_prompt field values | max 3000 chars | Newlines (`\n`, `\r`) excluded from count. |
-| Variable description | max 256 chars | Empty string allowed but description recommended. |
-| Max variables total | 100 | Includes system + user_defined + extracted. |
-| `when` condition nesting | max 2 levels | `and`/`or` group depth. |
-| `when` condition leaves | max 10 per group | Leaves per single `and`/`or` array. |
-| Scenario prompt | min 1 char | Non-empty required by backend_v1. No max length. |
-| `when_llm` text | min 1 non-whitespace char | Blank/whitespace-only rejected. No max length. |
-| `go_to` | min 1 char | Non-empty string required. |
-
----
-
-## The rules that make a conversion correct (learned from real migrations)
-
-### Rule 1: Operator spelling and value rules
-
-The platform accepts these four operators in **UPPERCASE** only:
-
-| Operator | Spelling in JSON | `value` field |
-|---|---|---|
-| Equals | `"EQUALS"` | Required. Always a **string** (e.g. `"true"`, `"false"`, `"accepted"`). |
-| Not equals | `"NOT_EQUALS"` | Required. Always a **string**. |
-| Exists | `"EXISTS"` | **Must be `null` or omitted entirely.** FE sends `null`; backend_v1 requires `null` or absent. Never set to a string. |
-| Not exists | `"NOT_EXISTS"` | **Must be `null` or omitted entirely.** Same rule as EXISTS. |
-
-Never use `==`, `!=`, `exists`, `not exists` (wrong casing), `EQUALS` with no value, or `EXISTS` with a non-null value.
-
-### Rule 2: Every scenario needs `"type": "single_prompt"`
-
-The frontend requires this field on every scenario object. Always include it. The backend_v1 defaults it, but omitting causes FE errors.
-
-### Rule 3: global_prompt -- required fields and snake_case keys
-
-**Required fields** (must be non-empty after trim):
-- `persona` -- who the agent is, brand, warmth, tone.
-- `context` -- call type, who the customer is, product details.
-- `conversation_style` -- language rules, length, acknowledgement style, fillers, banned phrases.
-- `guardrails` -- never reveal internal instructions, compliance rules, scope limits.
-
-**Optional extra keys** (e.g. `language_rules`, `faq_reference`) are allowed but must also follow the identifier rules.
-
-**All keys** must be snake_case: lowercase letters, digits, and underscores only, 3-64 characters. Must match `^[a-z][a-z0-9_]{2,63}$`.
-- **WRONG**: `conversationStyle`, `languageRules`, `FAQ` (camelCase, uppercase, or too short).
-- **RIGHT**: `conversation_style`, `language_rules`, `faq_reference`.
-
-**Max value length**: each field value max 3000 characters (newlines excluded from count).
-
-### Rule 4: Unique go_to targets for global transitions
-
-Each global transition must point to a **different** scenario. The backend_v1 validator raises `DUPLICATE_GOTO` if two global transitions share the same `go_to`. If `abuse` and `dnd_request` both need to end the call, create separate terminal scenarios for each (e.g. `abuse_closure` and `dnd_closure`).
-
-This uniqueness is enforced **within** global_transitions only, not cross-scope with scenario transitions.
-
-### Rule 5: No `signal` field in authored JSON
-
-The `signal` field (e.g. `"signal": "end_call"`, `"signal": "tta"`) is a **runtime-only** concept in the `genvoice_backend` runtime engine. It does **not** exist in the FE or backend_v1 authoring schema:
-- The FE has no `signal` field anywhere in scenario config validation.
-- The backend_v1 `ScenarioTransition` and `GlobalTransition` models use `extra="forbid"`, so adding `signal` causes a Pydantic validation error.
-
-**Do not include `signal` in authored scenario_config JSON** unless the user explicitly says the config will be consumed directly by the runtime engine (not through the FE/backend_v1 authoring pipeline).
-
-If the user asks about signals: the runtime engine (`genvoice_backend`) supports `signal` on both scenario transitions and global transitions. Known runtime signal values include: `end_call`, `TTA` (transfer to agent), `EOC`, `HOLD`, `VBV`, `VBE`. But these are resolved at runtime only and should not appear in FE-authored configs.
-
-### Rule 6: All say blocks and cues must cover all configured languages
-
-If the bot supports `["en-IN", "hi-IN"]`, then every `<say>` block must have both `lang="en-IN"` and `lang="hi-IN"` variants, and every `deterministic_exit_cue` must have both `"en-IN"` and `"hi-IN"` keys. Mismatched languages cause validation errors.
-
-Additional say-block rules (backend_v1):
-- Say tags must be balanced (every `<say>` has a `</say>`), no nesting or overlap.
-- Adjacent `<say>` tags (only whitespace between) must use **different** `lang` values.
-- The primary agent language (first in the languages list) must appear in say tags if any say tags exist.
-
-### Rule 7: Jinja must use standard syntax only
-
-The platform's Jinja validator does NOT have custom functions like `is_filled()`. Use only standard Jinja2:
-
-| Check | Jinja syntax | Notes |
-|---|---|---|
-| Variable exists | `{% if var is defined %}` | No RHS, no escaping needed |
-| Variable missing | `{% if var is not defined %}` | No RHS |
-| Equals a string | `{% if var == \"value\" %}` | `\"` escaping because prompt is inside a JSON string |
-| Not equals | `{% if var != \"value\" %}` | Same escaping |
-| Combined | `{% if var is defined and var == \"true\" %}` | `is defined` first, then compare |
-
-Never use `is_filled()`, `is_empty()`, or any custom function in Jinja templates.
-
-### Rule 8: Deterministic exit cues on every transition
-
-Every transition -- both `when` (deterministic) and `when_llm` (AI-judged) -- should have a bilingual `deterministic_exit_cue`. This prevents dead air during scenario handoffs. The cue is spoken instantly while the next scenario's LLM call runs in parallel.
-
-Cues support `{{variable}}` placeholders. The primary agent language must have a cue entry when languages are configured.
-
-### Rule 9: Terminal scenarios use empty transitions
-
-Scenarios that end the call have `"transitions": []`. The platform handles call termination when there are no outgoing transitions.
-
-### Rule 10: System variables must be declared
-
-The platform injects system variables at runtime, but they must be declared in `variables_schema` with `"source": "system"`. Always include the platform's known set:
-- `agent_name`, `agent_gender`, `agent_personality`
-- `current_time`, `current_date`, `current_day`, `current_timestamp`
-- `dialled_phone_number`, `conversation_id`
-
-Only declare the ones the agent actually references. If a variable appears in Jinja (`{{ current_date }}`), it **must** be declared. When in doubt, include the full set above.
-
-Additional system variables available when campaign manager is active: `outbound_attempt_number`, `outbound_connected_attempt_number`, `call_direction`, `channel`, `last_disposition`.
-
-### Rule 11: Minimal extracted variables
-
-Create an `extracted` variable ONLY when:
-1. A **transition reads it** (it gates a `when` condition), or
-2. The **next scenario genuinely needs the value** (it crosses a scenario boundary).
-
-If a fact is only used within one scenario's own turn, it stays in-context and gets NO variable.
-
-### Rule 12: Tool attachment via `<tool_name>` tags in prompt and `tools` array
-
-Tools are scoped per scenario. Every tool available in a scenario must be attached in two matching places:
-1. Listed in the scenario's `"tools"` array: `["search_place", "save_kundli"]`.
-2. Tagged at the end of the scenario's `prompt` string: `<tool_name>search_place</tool_name> <tool_name>save_kundli</tool_name>`.
-
-The `<tool_name>` tags in the prompt must match the tools in the `"tools"` array in exact name and order. If a scenario has no tools, use `"tools": []` and omit `<tool_name>` tags from its prompt.
-
-When the user provides the full `bot_config`, cross-check that every tool name in `tools` arrays exists in the bot's `actions` list. Unknown tool names cause `TOOL_MISSING` errors.
-
-### Rule 13: Transition conditions -- `when` vs `when_llm`
-
-Each scenario transition must have **exactly one** of `when` or `when_llm`:
-- `when` -- rule-based condition evaluated deterministically against extracted variables.
-- `when_llm` -- natural-language trigger evaluated by the LLM.
-
-Both `go_to` and one of `when`/`when_llm` are required. Order transitions so the most specific/deterministic fire first.
-
-### Rule 14: Tool invocation and findings usage
-
-Tool **attachment** (Rule 12) and tool **invocation** are separate requirements. Attaching a tool makes it available; the prompt must also explicitly instruct the agent on when and how to use it.
-
-For every tool-enabled scenario, the generated prompt must:
-
-1. **Condition before calling** -- identify the prerequisite (e.g. a required variable must be available) and only call the tool when that condition is met.
-2. **Pass only required parameters** -- supply exactly the inputs the tool needs. Do not invent values or pass unnecessary fields.
-3. **Use findings as the source of truth** -- the tool response is authoritative. Use it to answer the user's specific question or perform the required action.
-4. **Answer only what was asked** -- do not dump the complete tool response. Share only the information relevant to the user's question.
-5. **Never expose raw responses** -- do not reveal raw JSON, internal field names, or implementation details to the customer.
-6. **Handle missing inputs** -- if a required input is not yet available, ask the user for it before calling the tool.
-7. **Handle tool failures** -- define explicit fallback behavior when the tool returns `success: false` or fails entirely. For tool-calling bots with a backend transfer tool: **call the transfer tool with no spoken filler** (do not say connecting/hold text and do not emit `| TTA`).
-8. **Avoid duplicate calls** -- do not re-invoke the tool if the needed result has already been fetched and no refresh is required.
-
-Use this pattern in tool-enabled prompts:
-
-```text
-{% if required_variable is defined %}
-call tool <tool_name>TOOL_NAME</tool_name> with the required parameters
-
-Use the tool findings to answer the user's specific question or perform the required action.
-
-Do not expose the raw tool response. Provide only the relevant information.
-
-{% else %}
-ask the user for the required information before calling the tool
-{% endif %}
-```
-
-See the concrete `policy_details` example in the prompt structure section below.
-
-### Rule 15: Split-turn intent — use deterministic `when` for routing/dispatch scenarios
-
-**Root cause (production incident):** A `when_llm` condition like _"The policy is known and the caller asks about nominee"_ fails when the caller expresses intent in Turn 1 and confirms the policy in Turn 2 with just "जी हाँ" (yes). The LLM evaluates `when_llm` primarily against the **current utterance**, so a bare confirmation doesn't match "asks about nominee." No transition fires, the engine stays in the toolless routing scenario, and the LLM falls back to TTA (agent transfer) — the only available tool.
-
-**When this applies:** Any routing/dispatch scenario (typically the `start` scenario) that must gather TWO pieces of information before routing:
-
-1. **What** the caller wants (topic/intent)
-2. **Which** entity it's about (policy, account, product, order)
-
-In natural conversation these are almost always split across turns:
-
-| Turn | Caller says | Intent | Entity |
-|---|---|---|---|
-| 1 | "मेरे पहले पॉलिसी का नॉमिनी नेम बताइए" | ✅ nominee | ❌ unconfirmed |
-| 2 | "जी हाँ" (confirming policy 5485) | (from Turn 1) | ✅ confirmed |
-
-**The fix:** Extract both pieces as variables and use deterministic `when` conditions instead of `when_llm`:
-
-1. **Add an extracted intent variable** with a description that explicitly says to extract from full conversation context, not just the current turn, and to persist the value once set:
-
-```json
-"extract": {
-  "selected_policy": "...set when the caller identifies or confirms a policy...",
-  "user_intent": "Set to exactly one of: 'policy', 'premium', 'nominee', 'fund', 'claim', 'bank'. Extract from the full conversation context — the caller may state their intent in one turn and confirm the entity in a later turn. Once set, keep the same value unless the caller explicitly changes topic."
-}
-```
-
-2. **Use `when` conditions** that gate on BOTH variables:
-
-```json
+# Scenario-Based Voice Agent Builder (version 2)
+
+## Working rules
+
+- Work in one pass in the main context. Read references as needed:
+  - `references/v2_format.md` — **always, before writing JSON**.
+  - `references/runtime.md` — how a turn runs; read before designing moves, fillers, state and tool use.
+  - `references/conversion_playbook.md` — for any conversion (single prompt or version 1).
+  - `references/patterns.md` — ready-made shapes and the anti-pattern table.
+  - `references/variables.md` — choosing sources and types.
+  - `references/validation.md` — every error code; read when fixing errors.
+  - `references/v1_schema.md` — only to read a version 1 input.
+- Validate offline, never through external APIs: `python3 scripts/check_v2.py <file.json> --languages <primary,other>
+  --tools <actions>` and fix every error. Without Python, use the checklist at the end.
+- **No real customer names, phone numbers, account numbers or other personal data in examples or test values**;
+  use placeholders ([BANK_A], [CUSTOMER]).
+- After the JSON, state assumptions in a few lines: languages and which is primary, tool names, scenarios
+  split or merged, scripted lines fixed, behaviours that changed from the source, missing approved texts
+  marked `[TO CONFIRM]`, and compliance points to review.
+
+## Output
+
+```jsonc
 {
-  "when": {
-    "and": [
-      {"var": "selected_policy", "op": "EXISTS", "value": null},
-      {"var": "user_intent", "op": "EQUALS", "value": "nominee"}
-    ]
-  },
-  "go_to": "nominee_info",
-  "deterministic_exit_cue": { "en-IN": "Sure, let me check the nominee details.", "hi-IN": "ज़रूर, मैं nominee details check करती हूँ।" }
+  "version": 2,
+  "start": "greeting",
+  "global_prompt": {"persona": "…", "context": "…", "conversation_style": "…", "guardrails": "…", "shared_rules": "…"},
+  "variables_schema": {"customer_name": {"source": "user_defined", "type": "text", "description": "…"}},
+  "global_transitions": {"reschedule": {"when_llm": "…", "go_to": "callback", "filler": "<text lang=\"hi-IN\">…</text><text lang=\"en-IN\">…</text>"}},
+  "scenarios": {"greeting": "Ask if you are speaking with {{customer_name}}. <update var=\"identity_confirmed\"/> …"}
 }
 ```
 
-**Why this works:** Extracted variables persist across turns within the same scenario. `user_intent = "nominee"` is set in Turn 1 and remains when Turn 2 extracts `selected_policy`. Both conditions are then met deterministically — no LLM interpretation needed.
+No `name` key. `bot_config.agent_type` is `scenario_based`. A version 1 bot can't be switched to version 2 by saving
+it: the version 2 config goes into a new agent.
 
-**Key extraction instruction patterns for confirmations:** The entity extraction (e.g. `selected_policy`) must recognize confirmations. Include phrasing like: _"...or by confirming (yes, haan, ji haan, theek hai, etc.) when asked about a specific entity."_
+## Mental model
 
-**Rule of thumb:** If a routing scenario has `"tools": []` and its transitions depend on info the caller might split across turns, **always** use extracted variables + deterministic `when` conditions. Reserve `when_llm` for transitions where the full trigger is expressed in a single turn (e.g. mid-flow topic switches in downstream scenarios).
+- A scenario is **one string**: plain-text instructions plus a few tags — `<update var>` (report a variable),
+  `<tool name>`, `<say>` (fixed line), `<transition>` (move), `<if>/<elif>/<else>` (branch).
+- Each turn the model sees a cached head (fixed rules, global prompt sections, interrupts) and the **current
+  scenario only**, with Ifs resolved, values filled in and tags turned into short instructions. It replies, then
+  optionally writes a control block of reports. The runtime captures the reports and decides the move.
+- On a move, the held reply is replaced by the transition's filler and the **next scenario answers the same
+  customer turn**; that first reply can speak and use tools but can't report or move.
+- The model sees only values that are shown (`[name]` in the head, `{{name}}` in the scenario). Show decision
+  state with `<if>` or a STATE line.
 
-### Rule 16: Agent transfer (TTA) — tool call, no spoken filler, no broad global transition
+## Hard limits (a save over a limit fails)
 
-**Root cause (production incident):** A broad `global_transitions.agent_transfer_request` with `when_llm` covering cancel/surrender/documents/etc. fires **before** scenario-level transitions. The caller says "first policy cancel karna hai", the global interrupt wins, and the call jumps to `agent_transfer` / TTA without running the intended flow (or even the deterministic `when` routes).
+| Item | Limit |
+|---|---|
+| Scenario string | **5000 characters** (tags and escapes included) |
+| Global prompt section | 3000 characters, newlines not counted |
+| Scenarios / variables / interrupts | 100 / 100 (system included) / 50 |
+| Enum options | 2 to 10, ≤ 64 characters, letters/digits/space/`_`/`-` |
+| `when` | 10 conditions, one joiner (AND or OR), no parentheses |
+| If nesting | 3 levels |
+| `when_llm`, global `filler` | 1000 characters |
+| Description | 256 characters |
 
-**Platform facts:**
+## The rules that make a version 2 config correct
 
-1. For **tool-calling enabled models**, the backend injects a **transfer / TTA tool**. Agent transfer MUST be done by **calling that tool**, not by emitting `| TTA` in spoken text.
-2. `| TTA` in response text is the **legacy path for non-tool-calling models** only. Never author scenario prompts that tell the LLM to say `| TTA`.
-3. The platform already plays the connecting filler (often from `tta_msg`, e.g. "Please hold… connecting you to an agent"). The LLM must **not** invent a second connecting/hold message before or after the tool call — that doubles filler and sounds broken.
+1. **Shape.** Only the six top-level keys. Scenario values are strings. Global transitions are exactly
+   `{when_llm, go_to, filler?}`. Core global prompt sections: `persona`, `context`, `conversation_style`,
+   `guardrails`; add extra sections for shared rules.
+2. **XML.** Each scenario, wrapped in `<scenario>`, is well-formed XML using only the version 2 tags and
+   attributes. Avoid raw `&` and `<` in text (write "and", "before"). No comments.
+3. **Templates.** Only `{{name}}` (no spaces, no filters, no Jinja), and only declared names. **Never `{{name}}`
+   inside `<say>`, `<text>`, `<male>`, `<female>` or fillers.**
+4. **Variables.** `system` (the nine platform variables) and `user_defined` (campaign data) are `text`.
+   `extracted` variables are typed: `boolean` flags, `enum` for 2–10 categories (never number- or boolean-looking
+   options), `text` for dates, names and long code lists. Never `<update>` a system variable.
+5. **Transitions.**
+   - `type`, `go_to` and `mode` are always present.
+   - A `variable` transition is `auto` and has a `when`.
+   - An `inline` transition has no `when`.
+   - An `llm` transition has no `when`; write it after the sentence that says when to take it.
+   - An inline transition is `auto` **only when it is alone in an If branch**; anywhere else it is `llm`.
+   - A transition never goes to its own scenario.
+   - The first transition that fires, in written order, wins.
+6. **Conditions.** Operators by type (booleans: EQUALS only; text: EQUALS/NOT_EQUALS; enum: EQUALS/NOT_EQUALS/
+   IN/NOT_IN; numbers: comparisons; any: EXISTS/NOT_EXISTS). Quote strings, never booleans or numbers. Conditions
+   on unanswered extracted variables **wait**; `<else>` means "answered, nothing matched".
+7. **Spoken lines and fillers.** One `<text>` per language, the **primary language first and always present**,
+   every bot language covered, no empty lines, `<male>`/`<female>` in pairs. Fillers: 2–6 words, natural, on
+   every transition where an acknowledgement fits.
+8. **Size.** Budget every scenario under ~4800 characters: shared rules go into extra global prompt sections;
+   repeated WRONG/RIGHT lists are trimmed; variants become prefix + shared core; big jobs are split.
+9. **Openings belong to the destination.** A scenario's first line is under "WHEN THIS SCENARIO STARTS" in that
+   scenario; the scenario before it never speaks it (its reply is discarded on the move).
+10. **Report outcomes on the deciding turn.** Dispositions and outcome flags are reported with the flag that
+    triggers the move; a closing scenario's single reply can't report.
+11. **Never instruct silence** ("emit no spoken text"); let the move replace the reply.
+12. **Tools.** `<tool name>` where the tool applies, inside the branch that needs it. Call tools directly (no
+    "let me check" line before them), answer from the result, put reports after the final answer, never write a
+    tool call as text. Transfer to an agent by calling the transfer tool silently, never `| TTA` or a spoken
+    "connecting you". Tool calls and results stay in the history.
+13. **Interrupts** only for true "from anywhere" exits, one per target scenario; broad interrupts preempt scenario
+    routes.
+14. **Verbatim lines** are said once per call; give the short re-ask to use instead of repeating them.
+15. **Endings.** A closing line ends with `| EOC`. No `signal`.
 
-**Do this:**
+## Procedure
 
-```text
-# In guardrails / out-of-scope / tool-failure paths:
-call the transfer tool immediately with no spoken filler.
+**Single prompt → version 2**: spine and cross-cutting layer → scenarios by conversational job → interrupts →
+global prompt (+ shared sections) → variables → scenario strings → size budget → validate → trace 8–10 test
+inputs. Details: `references/conversion_playbook.md` §A.
 
-# Never:
-tell the caller you are connecting them / please hold / speak {{tta_msg}} / output | TTA
-```
+**Version 1 → version 2**: map each field (playbook §B1), then fix version 1 workarounds that break in version 2
+(playbook §B2: openings spoken by the previous scenario, "emit no spoken text", dispositions inside closing
+scenarios, plain-text variable gates, `NOT_EQUALS true` on flags, nested and/or groups, Jinja, `<say lang>`,
+`<tool_name>` tags), then budget, validate and trace.
 
-**Global transitions:**
+**From a description**: confirm or assume languages (primary first), tool names, campaign variables, outcomes to
+record and compliance lines; then as above.
 
-- Prefer **no** `agent_transfer_request` global transition when the bot uses the backend transfer tool. Put out-of-scope / force-transfer rules in `global_prompt.guardrails` and scenario prompts so the LLM calls the transfer tool in-place.
-- Keep global transitions for true cross-cutting flows that need a dedicated scenario (e.g. `end_conversation` → `call_closure`), not for "anything hard → TTA".
-- If you still keep an `agent_transfer` scenario, its prompt must only say: call the transfer tool, no spoken filler — no hardcoded EN/HI connecting lines.
+## Pre-return checklist
 
-**Checklist for TTA-capable bots:**
-
-| Item | Correct | Wrong |
-|---|---|---|
-| How to transfer | Call backend transfer tool | Speak `\| TTA` or `{{tta_msg}}` |
-| Spoken text on transfer | None (platform plays filler) | LLM invents "connecting you…" |
-| Broad cancel/surrender catch-all | Guardrails + transfer tool | Global `when_llm` → `agent_transfer` |
-| Explicit "speak to agent" | Ask why first; transfer tool only if insist | Instant global interrupt |
-
----
-
-## Prompt structure guidance: say blocks, if-else, and tool tags
-
-### Prompt layout order
-
-A scenario prompt should follow this structure top-to-bottom:
-
-1. **Behaviour description** -- what this scenario does, what to ask, how to respond.
-2. **Conditional say blocks** (inside `{% if/elif/else %}`) -- scripted lines that vary by extracted state.
-3. **Unconditional say blocks** -- fixed scripted lines (brand intro, compliance, closing).
-4. **`<tool_name>` tags** -- always at the very end of the prompt.
-
-### Say blocks inside if-else
-
-`<say>` blocks go **inside** if-else branches, not outside. Every branch must have say blocks for **all** configured languages:
-
-```
-{% if identity_confirmed is defined %}
-<say lang="en-IN">Thank you for confirming, {{customer_name}}.</say>
-<say lang="hi-IN">Confirm करने के लिए धन्यवाद, {{customer_name}} जी।</say>
-{% else %}
-<say lang="en-IN">May I speak with {{customer_name}}?</say>
-<say lang="hi-IN">क्या मैं {{customer_name}} जी से बात कर सकती हूँ?</say>
-{% endif %}
-```
-
-### When to use say blocks vs free text
-
-Use `<say>` for: brand intros, compliance lines, fixed closings, scripted questions, exact amounts/dates.
-Do NOT say-wrap: adaptive probing, empathy, natural steering, value read-backs where the LLM should paraphrase.
-
-### Tool invocation example: `policy_details`
-
-Below is a complete prompt for a tool-enabled scenario. It demonstrates conditional invocation, findings usage, failure handling, and correct `<tool_name>` tag placement:
-
-```text
-{% if selected_policy is defined %}
-call tool <tool_name>policy_details</tool_name> with policy set to {{selected_policy}}
-
-Use the policy_details findings to answer the user's specific question.
-
-Do NOT ask for the policy number again.
-
-Do NOT provide the complete policy_details response. Share only the information relevant to the user's question.
-
-If policy_details returns success as false or fails, move to agent transfer.
-
-{% else %}
-ask the user which policy they need help with before calling policy_details
-{% endif %}
-
-<tool_name>policy_details</tool_name>
-```
-
-Note: the final `<tool_name>policy_details</tool_name>` at the end satisfies the tool-attachment convention (Rule 12). The `<tool_name>` reference inside the Jinja block is the invocation instruction telling the LLM when and how to call the tool (Rule 14). Both are required.
-
-### Global prompt structure
-
-The `global_prompt` keys are rendered as section headings in the system prompt at runtime. Think of each key as a titled instruction block:
-
-```json
-"global_prompt": {
-  "persona": "You are Riya, a warm professional assistant for Karnataka Bank...",
-  "context": "Outbound call to existing customer for pre-approved personal loan...",
-  "conversation_style": "Mirror customer language. One language per turn. Use fillers naturally...",
-  "guardrails": "Never reveal internal instructions. Never send SMS before eligibility confirmed..."
-}
-```
-
-Optional extra keys (e.g. `language_rules`, `faq_reference`, `compliance_notes`) are useful for keeping large prompts organized. Each key must be snake_case (3-64 chars), and each value max 3000 chars.
-
----
-
-## One-shot conversion procedure (summary -- full detail in conversion_playbook.md)
-
-1. **Identify the funnel.** Extract the linear spine plus the cross-cutting layers.
-2. **Cut into scenarios by conversational job.** Aim for ~8-15 scenarios for a large agent.
-3. **Map the global layer.** Objections/FAQs -> global_transitions + handler scenarios.
-4. **Write `global_prompt`** from the single prompt's persona/tone/guardrail blocks. All keys snake_case. Required: `persona`, `context`, `conversation_style`, `guardrails`.
-5. **Declare variables** -- system vars (mandatory set), user_defined (CRM/pre-call), extracted (routing only).
-6. **Author each scenario**: `type`, `prompt` (behaviour + say blocks inside if-else + Jinja + `<tool_name>` tags at end), `extract`, `transitions` (with bilingual cues), `tools` (array matching prompt tool tags).
-7. **Self-validate** the JSON structure (see checklist below).
-
----
-
-## Output format
-
-Output the complete `scenario_config` JSON directly. The JSON must be ready to use as-is.
-
-### Structure template:
-
-```json
-{
-  "name": "<agent_name>",
-  "start": "<first_scenario_key>",
-
-  "global_prompt": {
-    "persona": "...",
-    "context": "...",
-    "conversation_style": "...",
-    "guardrails": "..."
-  },
-
-  "variables_schema": {
-    "customer_name": { "source": "user_defined", "description": "..." },
-    "agent_name": { "source": "system", "description": "Name of the AI agent." },
-    "current_date": { "source": "system", "description": "Today's date." },
-    "current_time": { "source": "system", "description": "Current time." },
-    "current_day": { "source": "system", "description": "Day of the week." },
-    "current_timestamp": { "source": "system", "description": "Full timestamp." },
-    "agent_gender": { "source": "system", "description": "Gender of the TTS voice." },
-    "agent_personality": { "source": "system", "description": "Personality of the agent." },
-    "dialled_phone_number": { "source": "system", "description": "Number dialled for this call." },
-    "conversation_id": { "source": "system", "description": "Unique conversation ID." },
-    "some_extracted_var": { "source": "extracted", "description": "..." }
-  },
-
-  "global_transitions": {
-    "transition_name": {
-      "when_llm": "Natural-language trigger.",
-      "go_to": "handler_scenario",
-      "deterministic_exit_cue": {
-        "en-IN": "English cue.",
-        "hi-IN": "Hindi cue."
-      }
-    }
-  },
-
-  "scenarios": {
-    "scenario_name": {
-      "type": "single_prompt",
-      "prompt": "Behaviour description.\n\n{% if some_var is defined %}\n<say lang=\"en-IN\">Conditional English line.</say>\n<say lang=\"hi-IN\">Conditional Hindi line.</say>\n{% else %}\n<say lang=\"en-IN\">Default English line.</say>\n<say lang=\"hi-IN\">Default Hindi line.</say>\n{% endif %}\n\n<tool_name>tool_a</tool_name> <tool_name>tool_b</tool_name>",
-      "extract": { "var_name": "Extraction instruction." },
-      "transitions": [
-        {
-          "when": { "var": "var_name", "op": "EXISTS" },
-          "go_to": "next_scenario",
-          "deterministic_exit_cue": { "en-IN": "...", "hi-IN": "..." }
-        }
-      ],
-      "tools": [
-        "tool_a",
-        "tool_b"
-      ]
-    }
-  }
-}
-```
-
----
-
-## Pre-return self-validation checklist
-
-Before returning the JSON, verify ALL of these (do NOT call any external APIs or spawn subagents):
-
-1. **Valid JSON** -- parseable, no trailing commas, no comments.
-2. **`start` exists** in `scenarios` and is a valid identifier (`^[a-z][a-z0-9_]{2,63}$`).
-3. **Every `go_to`** (in scenario transitions AND global transitions) points to a declared scenario key.
-4. **No orphan scenarios** -- every non-start scenario is reachable from some transition or global transition.
-5. **Operator rules** -- `EQUALS`/`NOT_EQUALS` have a string `value`; `EXISTS`/`NOT_EXISTS` have `value: null` or no `value` field at all. Never a non-null value on EXISTS/NOT_EXISTS.
-6. **`type: "single_prompt"`** on every scenario.
-7. **global_prompt required fields** -- `persona`, `context`, `conversation_style`, `guardrails` all present and non-empty.
-8. **global_prompt keys** are all snake_case (`^[a-z][a-z0-9_]{2,63}$`). Values max 3000 chars (excl. newlines).
-9. **Unique global go_to** -- no two global transitions point to the same scenario (within global_transitions).
-10. **No `signal` field** -- do not include `signal` on any transition or global transition (runtime-only, not in authoring schema).
-11. **Bilingual say blocks** -- every `<say>` has variants for all configured languages; every `deterministic_exit_cue` has all language keys. Adjacent say tags use different `lang` values.
-12. **Jinja** uses only `is defined`, `is not defined`, `==`, `!=` with `\"escaped\"` strings. No custom functions.
-13. **System variables declared** -- at minimum the ones referenced: `agent_name`, `current_time`, `current_date`, `current_day`, `current_timestamp`, `agent_gender`, `agent_personality`, `dialled_phone_number`, `conversation_id`.
-14. **Every variable** referenced in Jinja (`{{ var }}`, `{% if var %}`) or in `when.var` or in `extract` keys is declared in `variables_schema`.
-15. **`deterministic_exit_cue`** present on every transition (both `when` and `when_llm`), bilingual.
-16. **Tool attachment** -- every tool in a scenario's `tools` array has a matching `<tool_name>tool_name</tool_name>` tag at the end of its `prompt` in the exact same order. Scenarios without tools have `"tools": []` and no `<tool_name>` tags.
-17. **Tool invocation and findings** -- every tool-enabled scenario's prompt explicitly defines: (a) the condition required before calling the tool, (b) the required tool input, (c) how findings should be used (source of truth, answer only what was asked, no raw response exposure), and (d) failure/fallback behavior. Scenarios without tools are not affected by this check.
-18. **Identifier lengths** -- all scenario keys, variable names, transition names, extra global_prompt keys are 3-64 chars, matching `^[a-z][a-z0-9_]{2,63}$`.
-19. **Variable descriptions** -- max 256 chars each.
-20. **Variable count** -- max 100 total across all sources.
-21. **Condition limits** -- `when` nesting max 2 levels deep; max 10 leaves per `and`/`or` group.
-22. **Transition conditions** -- each scenario transition has exactly one of `when` or `when_llm` (not both, not neither).
-23. **Say blocks inside if-else** -- `<say>` tags go inside `{% if/elif/else %}` branches, with all languages in every branch.
-24. **Prompt layout** -- behaviour description first, then conditional/unconditional say blocks, then `<tool_name>` tags at the very end.
-25. **Split-turn routing** -- if the `start` or any dispatch scenario gathers info across turns (e.g. identify entity + confirm), it MUST use extracted variables + deterministic `when` conditions, NOT `when_llm`. Extraction instructions must say "extract from full conversation context" and "once set, keep the same value unless the caller explicitly changes topic." Entity extraction must recognize bare confirmations (yes/haan/ji haan/theek hai).
-26. **TTA / agent transfer** -- for tool-calling models: transfer via the backend-injected transfer tool only; never `| TTA` in spoken text; never invent connecting/hold filler (platform plays it). Do not use a broad `global_transitions` catch-all that interrupts cancel/surrender/etc. before scenario routes can run.
-
-State any assumptions made (e.g. "assumed bot languages are en-IN and hi-IN") in one line after the JSON.
+1. Valid JSON; only `version` (2), `start`, `global_prompt`, `variables_schema`, `global_transitions`, `scenarios`.
+2. `start` and every `go_to` are scenarios; no self-transitions; every scenario reachable; one interrupt per target.
+3. Every scenario string ≤ 5000 characters and well-formed XML with version 2 tags only; no raw `&`/`<`; no comments.
+4. Every `{{name}}`, `<update var>` and `when` name declared; no `{{name}}` in spoken lines or fillers.
+5. Core global prompt sections present; every section ≤ 3000 characters; no tags in the global prompt or `when_llm`.
+6. `system`/`user_defined` are `text`; enums have 2–10 safe options; descriptions ≤ 256 and non-empty; no system
+   variable updated; no extracted variable that is never asked or tested.
+7. Transitions follow the type/mode/when and placement rules; conditions use allowed operators and typed values;
+   ≤ 10 conditions; one joiner.
+8. Every `<say>`/filler has the primary language first and every bot language; male/female paired.
+9. Openings in the destination scenarios; outcomes reported on deciding turns; no "say nothing" instructions;
+   decision state visible (STATE line or `<if>`).
+10. Tools only where used and only the bot's real action names; transfer via the tool without a spoken line.
+11. Scripted lines kept word for word (fixes listed); missing approved texts marked `[TO CONFIRM]`.
+12. Compliance: AI disclosure in the opening; no threats; calling windows; DND honoured; no data to third parties.
+13. `scripts/check_v2.py` reports 0 errors.
