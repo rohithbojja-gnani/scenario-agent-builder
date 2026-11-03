@@ -174,5 +174,21 @@ config). No cache parameters are sent.
 | Tools array changes | the scenario's tools (plus TTA) are sent per turn, in first-use order; a different array misses the cache from the first token on OpenAI-style providers | tools in few scenarios; at the scenario's top level unless a branch must hide them; shared tools named in the same order |
 | Model tier | some fleets route on estimated prompt size (under ~15000 estimated tokens → faster tiers, decided on the first turn for the whole call) | keep head + history + scenario lean |
 
+**`<if>` and the cache.** An If costs nothing for the cache: the head never contains scenario text, and the runtime
+renders only the taken branch into the turn instructions, which are uncached anyway. The conditions and untaken
+branches never reach the model. So branching with `<if>` *reduces* per-turn tokens compared with prose
+("if premium, say X; if standard, say Y; …"), and it is deterministic. Measured on `assets/example_emi_v2.json`:
+the 1,307-character `payment_plan` string renders as 483 characters; `emi_reminder` renders 388 characters for
+`risk_band = low` and 493 for `high`. The one If-related cache cost is a `<tool>` inside a branch (the tools array).
+
+**Global prompt variables and VARIABLE VALUES.** Every `{{x}}` used in the head adds a `[x] = value` line to every
+turn's turn instructions, in every scenario, on top of the four date and time lines. A `{{x}}` used only in a
+scenario is filled inline there and costs nothing elsewhere. In the example the VARIABLE VALUES block (~11 lines)
+is larger than most scenarios' text. Reference a per-call value in the global prompt only when most scenarios need
+it (who the customer is, the product); put step-specific values (amounts, dates, IDs) in the scenarios that use them.
+
+Example budget (real runtime): head 6,338 characters (~1,760 tokens), identical across customers and turns; turn
+instructions 600-1,045 characters per turn.
+
 Things outside the author's control also break the cache: the per-call greeting (cross-call reuse stops after the
 head), history folding once it passes ~2000 tokens, and model fallbacks.

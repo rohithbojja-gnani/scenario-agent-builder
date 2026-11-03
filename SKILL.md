@@ -135,7 +135,9 @@ saving it: the version 2 config goes into a new agent.
 16. **Latency.** Everything static (persona, facts, FAQs, style, language rules) goes in global prompt sections,
     which are cached; scenarios stay short (the checker warns past 2500 characters); descriptions are one line;
     replies are 1–2 short sentences (they are generated in full before speaking); interrupts are few; branch with
-    `<if>` instead of pass-through scenarios. Don't restate the platform head (security guidelines, `| EOC` rule):
+    `<if>` instead of pass-through scenarios or prose "if X say Y" lists (only the taken branch is rendered, and Ifs
+    never touch the cached head); per-call values go in the global prompt only when most scenarios need them (each
+    one adds a line to every turn), otherwise `{{x}}` in the scenarios that use them. Don't restate the platform head (security guidelines, `| EOC` rule):
     `guardrails` holds domain and compliance rules.
 
 ## Procedure
