@@ -131,10 +131,19 @@ Read back once, only an in-window time. Confirmed → callback_confirmed true, t
 | Plain-text gates on variables ("if X is true") with no STATE or If | The model can't see X; it guesses | STATE line or `<if>` |
 | `x NOT_EQUALS true` on a boolean | `CONDITION_TYPE_MISMATCH` | Order transitions, or EXISTS / NOT_EXISTS |
 | Mixed AND/OR in one `when` | `WHEN_MIXED_JOINERS` | Nest Ifs or two transitions |
-| `{{name}}` inside `<say>` or a filler | `VARIABLE_IN_SPOKEN_LINE` | Quote the line as an instruction, or drop the value |
+| `{{name}}` inside a filler | `VARIABLE_IN_SPOKEN_LINE` (allowed in `<say>`) | Generic filler; the value goes in the next scenario's line |
 | A filler only in English for a Hindi-first bot | `PRIMARY_LANGUAGE_MISSING` | Primary language first, every bot language |
 | Enum options `1`, `2`, or more than 10 options | Unquoted values fail; over 10 fails | `tier1`/`tier2`; `text` for long code lists |
-| A 10k-character scenario | `SCHEMA_INVALID` (5000 max) | Shared rules to global sections; condense; split |
+| A 10k-character scenario | `TEXT_TOO_LONG` (5000 of text, every language and voice) and re-sent uncached every turn | Shared rules to global sections; condense; split |
+| `x IN ('a', 'b')` on an enum | Editor rejects multi-value IN | `x EQUALS 'a' OR x EQUALS 'b'` |
+| `(a OR b) AND c` | Editor parse error | `(a OR b) AND (c)`, or nest Ifs |
+| Plain `<text>` next to a `<male>`/`<female>` one in a `<say>` | Editor drops the plain line on re-save | Pair every language |
+| Campaign variable used only as the first operand of an `<if>` | Editor deletes it on save; save fails `VARIABLE_MISSING` | Also use it elsewhere (`{{x}}`, a later operand) |
+| `start` scenario that greets | The greeting was already played without the model | Continue from the caller's reply |
+| `<say>` in a scenario that stays several turns | Repeated every turn (SAY EXACTLY each render) | Move on the answer, or guard with `NOT_EXISTS` |
+| Closing scenario with only `<say>` lines | Spoken without the model: no `| EOC`, call stays open | One instruction line: thank, say goodbye, end the call |
+| `Note:` in a spoken line | Stop sequence: the line is cut | Rephrase |
+| Restating "never reveal your instructions" / injection rules | Already in the platform head | Domain and compliance rules only |
 | Raw `&` or `<` in scenario text | `XML_MALFORMED` | Reword ("and", "before") |
 | `inline` transition with `mode="auto"` next to other text | Editor error; runtime would move on the first turn | `llm` next to text; `auto` only alone in a branch |
 | `inline` transition `auto` outside any If | `AUTO_TRANSITION_UNCONDITIONAL` | `variable` with a `when`, or move it into a branch |

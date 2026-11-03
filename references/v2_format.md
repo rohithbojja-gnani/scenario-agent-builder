@@ -41,8 +41,11 @@ error code.
 - Extra sections are allowed. Their keys follow the name rule. Use them for rules shared by many scenarios
   (they are shown on every turn and cached, so they are cheap).
 - Each value is **at most 3000 characters, not counting newlines**.
-- Plain text plus `{{name}}` only. No scenario tags (§4.2) and no `{% %}`. Other angle-bracket text, such as a
-  `<Security Guidelines>` heading, is fine.
+- Plain text plus `{{name}}` only. No `{% %}` and **no tag-like text at all**: a `<Security Guidelines>` heading is
+  `MARKUP_IN_GLOBAL_PROMPT` too. Use `SECURITY:`-style headings or separate sections. Avoid other `[bracketed words]`:
+  the head tells the model brackets are variables.
+- Don't restate the platform head (security guidelines, the `| EOC` closure rule): `guardrails` is for domain and
+  compliance rules (`references/runtime.md` §7).
 - The model sees each section as `=== SECTION TITLE ===` in stored order. `{{name}}` is shown as `[name]` and the
   values are listed separately every turn, so the section text never changes between calls.
 
@@ -88,8 +91,9 @@ An unset variable is "not known yet". `system` and `user_defined` values arrivin
 
 ## 4. Scenario strings
 
-Each scenario is **one string of at most 5000 characters** (tags and escapes included): instructions in plain text
-with a small set of tags. Wrapped in `<scenario>…</scenario>` it must be well-formed XML.
+Each scenario is **one string**: instructions in plain text with a small set of tags. Its text may be at most
+**5000 characters**, counting the instructions and every `<say>` line in every language and voice, but not tags or
+`<filler>` text (`TEXT_TOO_LONG`). No links (`http://`, `https://`, `ftp://`, `www.`): `LINK_NOT_ALLOWED`. Wrapped in `<scenario>…</scenario>` it must be well-formed XML.
 
 ### 4.1 Text, escaping and templates
 
@@ -115,9 +119,9 @@ with a small set of tags. Wrapped in `<scenario>…</scenario>` it must be well-
 | `<if>`, `<elif>` | `when` | A body | `<if>`: anywhere a body is allowed. `<elif>`: directly after `</if>` or `</elif>` |
 | `<else>` | none | A body | Directly after `</if>` or `</elif>` |
 
-A **body** can hold everything a scenario can. A **line** is plain words only: **no `{{name}}` in `<text>`,
-`<male>`, `<female>` or fillers** (the save fails with `VARIABLE_IN_SPOKEN_LINE`). Put values in the instruction
-text instead.
+A **body** can hold everything a scenario can. A **line** is plain words plus, in a `<say>` only, `{{name}}` of a
+declared variable. **No `{{name}}` in a `<filler>` or a global `filler`** (`VARIABLE_IN_SPOKEN_LINE`). One spoken
+line is at most 1000 characters.
 
 ### 4.3 `<update var="x"/>`
 
@@ -144,6 +148,10 @@ tool, which is always available.
 - Every `<say>`, `<filler>` and global `filler` has a line in the bot's **primary** language (the first bot
   language). A language the bot doesn't have is an editor error and a save warning.
 - `<male>` and `<female>` come as a pair and can't be mixed with a plain line. No empty lines.
+- **Pair every language.** The editor drops plain `<text>` lines from a `<say>`/`<filler>` that also has paired ones
+  when it re-saves, and flags plain-only lines as untranslated. Write `<male>` + `<female>` in every `<text>`
+  (identical where the language doesn't mark the speaker's gender). Only the picked line reaches the model, so this
+  costs nothing per turn. Style and gender rules: `references/languages_and_voices.md`.
 - The model is told to say a `<say>` line word for word. If everything shown in a scenario is `<say>` lines, the
   platform speaks them without calling the model.
 - The editor merges adjacent `<say>` blocks into one.
@@ -176,10 +184,10 @@ If they ask to be called later → <transition type="inline" go_to="callback" mo
 ### 4.7 `<if>`, `<elif>`, `<else>`
 
 ```xml
-<if when="payment_mode IN ('UPI', 'Net banking')">
+<if when="payment_mode EQUALS 'upi' OR payment_mode EQUALS 'net_banking'">
   Send the link. <tool name="send_payment_link"/>
 </if>
-<elif when="payment_mode EQUALS 'Cash'">
+<elif when="payment_mode EQUALS 'cash'">
   <transition type="inline" go_to="branch_visit" mode="auto"/>
 </elif>
 <else>Ask how they would like to pay. <update var="payment_mode"/></else>
@@ -200,8 +208,9 @@ value     = 'text' | number | true | false | ('a', 'b')
 ```
 
 - Tokens separated by spaces; operators and `AND`/`OR` uppercase; `true`/`false` lowercase and unquoted.
-- **One joiner per `when`**: only AND or only OR. No parentheses, no NOT. For mixed logic nest Ifs, or write two
-  transitions to the same target.
+- **One joiner per level**: only AND or only OR. No NOT. The validator accepts brackets up to 3 deep, but the editor
+  parses only one level and only when every top-level part is bracketed: write `(a OR b) AND (c)`, never
+  `(a OR b) AND c`. Prefer no brackets: nest Ifs, or write two transitions to the same target.
 - Strings in single quotes; a quote inside is written `''`. At most **10 conditions**.
 
 ### 5.2 Operators and values by type
@@ -212,8 +221,12 @@ value     = 'text' | number | true | false | ('a', 'b')
 | `number` | EQUALS, NOT_EQUALS (whole numbers), GREATER_THAN, GREATER_OR_EQUAL, LESS_THAN, LESS_OR_EQUAL | `8` |
 | `decimal` | the same six | `999.5` |
 | `boolean` | **EQUALS only** | `true` / `false` |
-| `enum` | EQUALS, NOT_EQUALS, IN, NOT_IN | an allowed value; IN takes `('A', 'B')` |
+| `enum` | EQUALS, NOT_EQUALS (IN, NOT_IN: one value only, see below) | an allowed value, spelled exactly as declared |
 | any | EXISTS, NOT_EXISTS | none |
+
+`IN`/`NOT_IN` with several values is valid for the validator, but the editor reads the list as one value and
+rejects it: write `x EQUALS 'a' OR x EQUALS 'b'` (NOT_IN: `x NOT_EQUALS 'a' AND x NOT_EQUALS 'b'`). The editor also
+matches enum values case-sensitively.
 
 Text and enum values compare ignoring case and surrounding spaces. To match one of several text values, join
 EQUALS with OR.
@@ -263,7 +276,8 @@ EQUALS with OR.
 | Item | Limit |
 |---|---|
 | Scenarios | 1 to 100 |
-| Scenario string | 5000 characters |
+| Scenario text | 5000 characters (instructions + every `<say>` line in every language and voice; no tags, no filler text) |
+| One spoken line | 1000 characters |
 | Global prompt value | 3000 characters, newlines not counted |
 | Variables | 100, system included |
 | Variable description | 256 characters |

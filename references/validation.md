@@ -1,6 +1,7 @@
 # Validation: editor, save-time validator and runtime
 
-A version 2 config passes three layers. Write for the strictest rule of all three. State of the rules: October 2026.
+A version 2 config passes three layers. Write for the strictest rule of all three. State of the rules: verified against the code on 3 November 2026
+(`scripts/check_v2.py` matches the save-time validator's codes on 106 cases).
 
 | Layer | When | On failure |
 |---|---|---|
@@ -16,10 +17,10 @@ schema errors first.
 
 | Code | When | Fix |
 |---|---|---|
-| `SCHEMA_INVALID` | Wrong top-level keys (`name`, `type`…), `version` not the integer 2, more than 100 scenarios, a scenario string empty or over 5000 characters, more than 50 global transitions, `when_llm`/`filler` over 1000, a variable with extra keys, `allowed_values` on a non-enum (even `null`), a `system`/`user_defined` variable that isn't `text`, a global prompt core section missing or empty, a global prompt value over 3000 characters (newlines not counted), more than 100 variables, a description over 256, an invalid name | Match `references/v2_format.md` |
+| `SCHEMA_INVALID` | Wrong top-level keys (`name`, `type`…), `version` not the integer 2, more than 100 scenarios, an empty scenario string, more than 50 global transitions, `when_llm`/`filler` over 1000, a variable with extra keys, `allowed_values` on a non-enum (even `null`), a `system`/`user_defined` variable that isn't `text`, a global prompt core section missing or empty, a global prompt value over 3000 characters (newlines not counted), more than 100 variables, a description over 256, an invalid name | Match `references/v2_format.md` |
 | `XML_MALFORMED` | A scenario string or global `filler` isn't well-formed XML (raw `&` or `<` in text, unclosed tag), or has a DOCTYPE or unknown entity | Escape or reword; use a serializer |
 | `COMMENT_NOT_ALLOWED` | An XML comment or processing instruction | Remove it |
-| `UNKNOWN_ELEMENT` | A tag not in the element list, e.g. `<u>`, `<b>`, `<tool_name>`, `<say lang>` from version 1 | Use only the version 2 tags |
+| `UNKNOWN_ELEMENT` | A tag not in the element list, e.g. `<b>`, `<note>`, `<tool_name>` from version 1 (`<u>…</u>` underline is accepted and stripped before the model; don't use it) | Use only the version 2 tags |
 | `UNKNOWN_ATTRIBUTE` | An attribute an element doesn't take, e.g. `signal` or `lang` on a transition, `lang` on `<say>` | Remove it |
 | `MISSING_ATTRIBUTE` | `var`, `name`, `type`, `go_to`, `mode`, `lang`, `when` on `<if>`/`<elif>`, or `when` on a `variable` transition, missing or blank | Add it |
 | `INVALID_ATTRIBUTE_VALUE` | `type` not `inline`/`variable`, `mode` not `llm`/`auto` | Fix the value |
@@ -31,8 +32,8 @@ schema errors first.
 | `SYSTEM_VARIABLE_UPDATE` | `<update>` names a `system` variable | Never update system variables |
 | `LLM_TRANSITION_WITH_WHEN` | `mode="llm"` with a `when` | Drop the `when`, or make it `variable`/`auto` |
 | `AUTO_TRANSITION_UNCONDITIONAL` | `mode="auto"` with no `when`, outside any If branch | Add a `when` or put it alone in a branch |
-| `WHEN_SYNTAX` | A `when` doesn't parse: unknown or lowercase operator, unquoted string, missing value or quote, a value after EXISTS, parentheses | See the grammar |
-| `WHEN_MIXED_JOINERS` | Both AND and OR in one `when` | Split into nested Ifs or two transitions |
+| `WHEN_SYNTAX` | A `when` doesn't parse: unknown or lowercase operator, unquoted string, missing value or quote, a value after EXISTS, an unmatched bracket, brackets deeper than 3 | See the grammar |
+| `WHEN_MIXED_JOINERS` | Both AND and OR at one level of a `when` | Bracket one side, editor-safe form `(a OR b) AND (c)`, or split into nested Ifs or two transitions |
 | `TOO_MANY_CONDITIONS` | More than 10 conditions in a `when` | Split |
 | `CONDITION_TYPE_MISMATCH` | An operator not allowed for the type (NOT_EQUALS on a boolean, GREATER_THAN on text), a value that doesn't fit (`'true'` quoted for a boolean, text for a number, a decimal for number EQUALS, a value not in `allowed_values`) | See operators and values by type |
 | `IF_NESTING` | Ifs nested more than 3 levels | Flatten |
@@ -40,12 +41,15 @@ schema errors first.
 | `DUPLICATE_LANGUAGE` | Two `<text>` for one language in one container | Merge |
 | `VOICE_PAIR_INCOMPLETE` | `<male>` without `<female>` or the reverse, or a line mixed with them | Pair them |
 | `EMPTY_LINE` | An empty `<text>`, `<male>` or `<female>` | Fill or remove |
-| `VARIABLE_IN_SPOKEN_LINE` | `{{name}}` inside `<text>`, `<male>`, `<female>` or any filler | Move the value into instruction text |
+| `VARIABLE_IN_SPOKEN_LINE` | `{{name}}` inside a `<filler>` or a global `filler` (it is allowed in `<say>` lines) | Keep fillers generic; put the value in the next scenario's line |
+| `TEXT_TOO_LONG` | A scenario's text over 5000 characters (instructions + every `<say>` line in every language and voice; tags and `<filler>` text not counted), or one spoken line over 1000 | Shared rules to global sections; split the scenario |
+| `LINK_NOT_ALLOWED` | `http://`, `https://`, `ftp://` or `www.` in scenario text, a spoken line or `when_llm` | Describe it ("the link we SMS you"); send it with a tool |
 | `INVALID_ALLOWED_VALUES` | Fewer than 2 or more than 10 options, an option over 64 characters, duplicates ignoring case, `<DEFAULT>`, or characters other than letters, digits, space, `_`, `-` | Fix the list, or use `text` |
 | `TEMPLATE_NOT_ALLOWED` | `{% %}`, `{# #}`, a filter, spaces inside `{{ }}`, or an unclosed `{{` | Plain `{{name}}` only |
-| `MARKUP_IN_GLOBAL_PROMPT` | A scenario tag in `global_prompt` or `when_llm` | Plain text there |
+| `MARKUP_IN_GLOBAL_PROMPT` | Any tag-like `<Word …>` in `global_prompt` or `when_llm`, including a `<Security Guidelines>` heading (only balanced `<u>…</u>` passes) | Plain text there; `SECURITY:` style headings |
 
-Also checked on save: the greeting and end messages (undeclared variables, extracted variables in them).
+Also checked on save: the greeting and end messages (undeclared variables, extracted variables in them). More than 50
+errors end with one `MORE_ISSUES` error: fix and re-run.
 
 ## 2. Save-time warnings (don't block)
 
@@ -72,7 +76,8 @@ Also checked on save: the greeting and end messages (undeclared variables, extra
   implies (inline alone in a branch → `auto`, otherwise `llm`; variable → `auto`); `llm` has no `when`; `variable`
   has a `when`.
 - Variables: `user_defined` must be Text; an enum needs non-empty unique options; a description is required.
-- Warnings: unused variables are **removed on save**; unreachable scenarios; duplicate prompts.
+- Warnings: unused variables are **removed on save**; unreachable scenarios; duplicate prompts; lines without
+  `<male>`/`<female>` (shown as untranslated).
 
 The editor does not check the character limits, tools, primary-language presence, updates of system variables,
 unknown tags or raw `&`/`<` — the save-time validator does.
@@ -96,14 +101,35 @@ Write configs so they survive an edit in the editor:
   enum options such as `1`, `2`, `true`, and text conditions on numeric strings.
 - **`when` values with `&`, `<`, `>` or `"` gain extra escaping on each save**: avoid those characters in values.
 - **The underline button writes `<u>`**, which the validator rejects. Don't use underline.
-- **Enum options**: the editor allows 1 to 50; the validator allows 2 to 10. Stay within 2 to 10.
+- **Enum options**: 2 to 10, and the editor only keeps options matching `^[a-zA-Z0-9 _-]+$` (it drops others on
+  load) and compares condition values case-sensitively. Use Latin snake_case options and write them in `when`
+  exactly as declared.
 - **Mixed AND/OR groups** in the condition builder silently become all-OR. Check conditions after editing.
 - **Adjacent `<say>` blocks are merged** on load.
+- **Multi-value `IN`/`NOT_IN` fails** in the editor (the list is read as one value `"A, B"`): write
+  `x EQUALS 'A' OR x EQUALS 'B'` (and `NOT_EQUALS … AND …` for NOT_IN).
+- **Brackets**: the editor parses only one level, and only when every top-level part is bracketed:
+  `(a OR b) AND (c)`, not `(a OR b) AND c`. Without brackets, one joiner per `when`.
+- **A `<say>`/`<filler>` mixing paired and plain `<text>` loses the plain lines** when the editor re-saves it. Write
+  `<male>` and `<female>` in every language's `<text>` (identical where the language doesn't mark gender).
+- **A variable whose only use is the first operand of an `<if>`/`<elif>` `when`** (e.g. campaign data only in
+  `<if when="risk_band EQUALS 'high'">`) is treated as unused, deleted on save, and the save then fails
+  `VARIABLE_MISSING`. Make sure it is also used elsewhere (`{{x}}`, `<update>`, a later operand, a transition `when`).
 - **Unused variables are deleted on save**, and `{{new_name}}` typed in text auto-creates a `user_defined` text
   variable with an empty description (then `UPDATE_WITHOUT_DESCRIPTION` if updated).
 - The JSON drawer omits `version`; the API always sends `version: 2`.
 
-## 6. What changed from version 1 (common migration errors)
+## 6. `scripts/check_v2.py` extras
+
+Besides the save-time codes, the checker reports:
+- Editor errors: `TRANSITION_TYPE_MISMATCH` / `TRANSITION_MODE_MISMATCH` (contract placement rules), `DUPLICATE_GLOBAL_TARGET`,
+  `FE_IN_LIST`, `FE_BRACKETS`, `FE_ENUM_CASE`, `FE_EMPTY_BRANCH`, `FE_MIXED_VOICES`, `FE_GLOBAL_PROMPT_BLANK`,
+  `FE_VARIABLE_PRUNED`; warnings `FE_NO_VOICE_PAIRS`, `PRIMARY_NOT_FIRST`.
+- Runtime warnings (`references/runtime.md`): `LINT_SAY_ONLY`, `LINT_NO_ESCAPE` (a waiting condition with no `llm`
+  exit), `LINT_NO_FILLER`, `LINT_LANGUAGE_MISSING`, `LINT_STOP_WORD`, `LINT_SCENARIO_LONG` (over 2500 characters of
+  uncached text per turn).
+
+## 7. What changed from version 1 (common migration errors)
 
 | Version 1 habit | Version 2 rule |
 |---|---|

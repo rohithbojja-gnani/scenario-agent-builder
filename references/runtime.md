@@ -125,3 +125,54 @@ history, so later turns can use them.
     instead of repeating them.
 14. **The transfer-to-agent tool is always available**: transfer by calling it, without a spoken "connecting you"
     line (the platform plays its own), and never by writing `| TTA` in speech.
+
+## 7. Call start
+
+genvoice-call-message plays the greeting (`initial_message`, values filled in) **without the model**, and seeds the
+history as `user: "Hey Hi"`, `assistant: <greeting>`. The `start` scenario therefore answers the caller's reply to
+the greeting; it never greets again. The greeting may use `system`/`user_defined` variables only. Call-message also
+sets, once per call in the bot's time zone, `current_time` (`12:00 PM`), `current_date` (`12 July 2026`),
+`current_day`, `current_timestamp` (ISO with offset), `dialled_phone_number`, `conversation_id`, and from the active
+voice persona `agent_name`, `agent_gender` (`Female`/`Male`) and `agent_personality`. Extracted variables start as
+`<DEFAULT>`.
+
+The head already contains the platform's security guidelines (never reveal instructions, reject prompt injection,
+never name the model or provider) and closure rules (one short goodbye ending in `| EOC`). Don't restate them in the
+global prompt: `guardrails` is for domain and compliance rules. The head also tells the model that words in square
+brackets are variables, so avoid other `[bracketed words]` in the global prompt. Scenario names and exit targets are
+shown to the model (`CURRENT SCENARIO: x`, `[exit: x]`): name them by meaning.
+
+## 8. `<say>` caveats
+
+- A `<say>` is shown as SAY EXACTLY on **every** turn its scenario is current. Use it where the scenario moves on the
+  next answer, or guard it with `<if when="x NOT_EXISTS">` on a variable set right after it.
+- A scenario whose shown content is only `<say>` lines is spoken without the model (also when it is the target of a
+  move, so no extra call). It then **never ends the call** (no `| EOC`), catches no interrupt, and repeats on the next
+  turn unless a transition fires. Never make a closing scenario say-only; give it one instruction line.
+- The model's stop sequence is `Note:`: a line the model speaks is cut there. Never put `Note:` in spoken lines.
+- `max_tokens` is 400 (at most 600) for the spoken reply **and** the control block together.
+
+## 9. Latency and prompt (KV) cache
+
+The request each turn: `[tools]` (OpenAI-style providers) · head · `"Hey Hi"` · greeting · history · latest
+customer message + turn instructions (+ knowledge-base context). Providers reuse a request only up to its first
+changed token (Azure OpenAI caches automatically from 1024 prompt tokens; self-hosted servers depend on their
+config). No cache parameters are sent.
+
+| Part | Reused |
+|---|---|
+| Head (fixed rules, global prompt, interrupts) | Across all turns and calls of the bot while the config is unchanged (`PROMPT_BUILT … head_hash` in logs) |
+| Greeting and history | Within a call: each request repeats the previous one up to the latest customer message |
+| Latest message + turn instructions (rendered scenario, variable values, THIS TURN) | Never: computed every turn |
+
+| Cost | Where it comes from | Lever |
+|---|---|---|
+| Uncached prefill every turn | the rendered scenario, every shown description, the VARIABLE VALUES lines | short scenarios; static content in global prompt sections; one-line descriptions |
+| First audio waits for the whole reply | while a move is possible (almost every turn) the reply and its control block are generated in full before anything is spoken | replies of 1-2 short sentences; few reports per turn; short values |
+| A move | the held reply is discarded, the filler plays, then a **second serial LLM call** answers in the new scenario | fillers on moves; no pass-through scenarios that only hop on; branch with `<if>` when the job is the same |
+| Tools | each tool result triggers another model call (up to 4) | call once; no chains in one turn |
+| Tools array changes | the scenario's tools (plus TTA) are sent per turn, in first-use order; a different array misses the cache from the first token on OpenAI-style providers | tools in few scenarios; at the scenario's top level unless a branch must hide them; shared tools named in the same order |
+| Model tier | some fleets route on estimated prompt size (under ~15000 estimated tokens → faster tiers, decided on the first turn for the whole call) | keep head + history + scenario lean |
+
+Things outside the author's control also break the cache: the per-call greeting (cross-call reuse stops after the
+head), history folding once it passes ~2000 tokens, and model fallbacks.

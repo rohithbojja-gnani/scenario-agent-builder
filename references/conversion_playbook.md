@@ -14,6 +14,9 @@ the save-time validator. Keep every customer-facing scripted line word for word 
   wrong number, distress or death, already paid, not my loan, FAQs).
 - **Shared rules**: rules that apply in many steps (date resolution, how to speak amounts, FAQ answers, compliance
   lines).
+- **The greeting**: the source's first line becomes the bot's greeting (`initial_message`), played without the
+  model before any scenario runs. The `start` scenario answers the caller's reply to it and never greets again.
+  The greeting may use only `system`/`user_defined` variables; it carries the AI disclosure.
 
 ### A2. Cut the spine into scenarios by conversational job
 
