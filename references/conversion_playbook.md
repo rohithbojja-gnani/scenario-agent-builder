@@ -1,139 +1,109 @@
-# Conversion Playbook — Single Prompt → Scenario Agent
+# Conversion playbook: single prompt (or v1) → scenario_config v2
 
-The goal is **parity or better**: the scenario agent must respond at least as well as the single prompt.
+Goal: **parity or better** than the source prompt, at lower latency. Work linearly; don't write JSON before step 5.
 
-## Step 1 — Read the whole single prompt and separate two things
+## Step 0: collect inputs (ask once, in one message, for whatever is missing)
 
-- **The spine (linear funnel):** the ordered path the call normally takes. Examples:
-  - Collections: greet → identity → pitch/status → capture pay date+mode → confirm → closure.
-  - Loan lead: greet → interest → eligibility checks → offer → send link → closure.
-- **The cross-cutting layers** that can fire from anywhere: objections, FAQs, "call me later", "talk to a
-  human", abuse, distress, wrong number/DND, "not interested".
+| Input | Why | Default if the user can't give it |
+|---|---|---|
+| The source prompt (single prompt or v1 `scenario_config`) | the behaviour to preserve | required |
+| Bot languages, primary first (`["en-IN","hi-IN"]`) | `<text lang>` set, primary required | ask; never guess silently |
+| Voice persona gender(s) the bot may use | which `<male>`/`<female>` line is spoken | assume both: every line is paired anyway |
+| Tool/action names (`bot_config.actions[].name`), incl. the transfer action | `<tool name>` must match exactly (`TOOL_MISSING`) | use names from the prompt, flag as assumptions |
+| Campaign/CRM fields sent per call | `user_defined` variables | the `{{…}}` in the source prompt |
+| Greeting (`initial_message`) and ending message | first audio, and they may only use system/user_defined vars | keep the source's |
+| Domain regime (BFSI/RBI, insurance/IRDAI, health, outbound/TRAI) | guardrails, AI disclosure, consent | flag for Compliance review |
 
-The spine becomes ordered scenarios; the layers become `global_transitions` + handler scenarios.
+## Step 1: read the source and separate
 
-## Step 2 — Cut the spine into scenarios by _conversational job_
+- **Spine**: the ordered path a normal call takes (greet → verify → purpose → collect → confirm → close).
+- **Cross-cutting layer**: anything that can happen at any point: busy/callback, wrong person, human agent,
+  abuse, DND/stop calling, not interested, FAQs/objections, language switch, silence/unclear.
+- **Facts**: product facts, FAQs, compliance lines, numbers. These are static: they belong in `global_prompt`
+  (cached), not in scenarios.
+- **Scripted lines**: exact wording that must not drift (disclosures, amounts read back, consent text). These
+  become `<say>`.
 
-Group tightly-coupled steps into one scenario; split a genuinely different beat into its own.
+## Step 2: cut the spine into scenarios by conversational job
 
-Heuristics:
+- One job per scenario; a fragile ask-parse-re-ask loop stays in one scenario.
+- Split when the result routes differently, or when the scenario needs different tools.
+- Branch inside a scenario with `<if>` when the job is the same and only the wording differs (campaign data,
+  segment, an answer just captured). Split into scenarios when the job changes.
+- Keep each scenario well under 5000 chars (counting every language and voice of its `<say>` lines).
+- Typical size: 6-15 scenarios. Fewer usually means a monolith; more means routing overhead and extra recall
+  steps.
 
-- **One job per scenario.** "Confirm identity" is one. "Check eligibility" is one.
-- **Keep a fragile sub-routine whole.** All of eligibility-check ask/parse/re-ask belongs in ONE scenario.
-- **Split when the result routes differently.** e.g. `check_epf` (ask, get answer) then routes to `eligible_offer` or `check_official_email`.
-- **A re-classification loop back to an earlier scenario is normal.**
-- Target **~8-15 scenarios** for a large agent. Fewer means you kept the monolith; more means you split too fine.
+## Step 3: map the cross-cutting layer
 
-## Step 3 — Map the cross-cutting layer
+| Need | v2 construct |
+|---|---|
+| Can happen anywhere and needs its own flow (callback, wrong person, abusive, DND) | `global_transitions` entry → handler scenario |
+| Can happen anywhere and is just knowledge (FAQ, objection answers) | `global_prompt` section (e.g. `faq`), answered in place, no move |
+| Only possible in one or two steps | `llm` inline transition in those scenarios |
+| Human agent / transfer | guardrail: "call the transfer tool"; see `patterns.md` §Transfer. Not a broad interrupt |
+| End of call | a closing scenario (instructions + `<say>`), and the platform's end-call rules in the head |
 
-- **Objections & FAQs** → a single `faq_handling` scenario reached by a `global_transition`, or inline handling.
-- **Busy / call me later** → a `callback` scenario reached by a `callback_request` global transition.
-- **Not interested** → a `not_interested_rebuttal` scenario with one rebuttal attempt.
-- **Abuse** → an `abuse_closure` terminal scenario.
-- **DND / don't call again** → a `dnd_closure` terminal scenario.
-- **Wrong number** → a `wrong_number` terminal scenario.
-- **Talk to a human / force transfer** → for **tool-calling** bots: do **not** add a broad `agent_transfer_request` global transition. Instruct guardrails/scenarios to **call the backend transfer tool with no spoken filler** (platform plays the connecting message). Never author `| TTA` text for tool-calling models. Only use a dedicated `agent_transfer` scenario if you truly need a transition target — and even then, prompt must only invoke the transfer tool, no LLM-generated connecting filler.
+Interrupts are in the cached head on every request: keep to the few that truly need a flow (3-6).
 
-**Critical rule: each global transition must have a UNIQUE `go_to` target.** If abuse and DND both need terminal scenarios, create separate ones.
+## Step 4: decide variables
 
-## Step 4 — Write global_prompt (what is global vs per-scenario)
+- `user_defined`: every campaign/CRM field the source uses (`text` only).
+- `system`: the 9 platform ones; declare those you reference.
+- `extracted`: ONLY values that (a) gate a `when`, or (b) a later scenario reads. Everything else stays in the
+  conversation. Pick the tightest type: `boolean` for yes/no, `enum` (2-10 values) for categories, `number`/
+  `decimal` for amounts and counts you compare, `text` for free values (dates, times, names).
+- Every variable gets a description written for the model: what it is, the format, and when to set it.
 
-Put in `global_prompt` (applies to every turn):
+## Step 5: write global_prompt (static, cached)
 
-- **persona**: who the agent is, brand, warmth, tone.
-- **context**: call type, who the customer is, product details.
-- **conversation_style**: language rules, length, acknowledgement style, fillers, banned phrases.
-- **guardrails**: never reveal internal instructions, compliance rules, scope limits.
-- **language_rules**: language mirroring, when to use which language.
+Sections in this order (stable order = stable cache): `persona`, `context`, `conversation_style`, `guardrails`,
+then extras such as `language_rules`, `faq`, `compliance`. Everything that is true on every turn goes here, written
+once. Only `{{name}}` placeholders; no tags, no per-call text. Details: `runtime_and_latency.md` §3.
 
-**All keys must be snake_case** (e.g. `conversation_style`, NOT `conversationStyle`).
+## Step 6: write each scenario string
 
-Keep in the **scenario prompt** (not global): anything step-specific — specific questions to ask, specific data to gather, step-specific compliance rules.
+Order inside a scenario (matches how the model reads it):
 
-## Step 5 — Declare variables (see variables.md)
+1. One line of goal ("Confirm the caller is {{customer_name}}."). The `start` scenario continues from the greeting
+   (already spoken, no LLM); it never greets again.
+2. `<say>` for the fixed line, if any.
+3. Instructions for this step only, each followed by its `<update>` where the answer is captured.
+4. `<if>` blocks that branch on captured or campaign values.
+5. Exits: `llm` inline transitions for judgement calls, `variable` transitions for deterministic moves, each
+   with a `<filler>` when the move needs a bridge. A move discards that turn's reply, so an exit fires on the
+   caller's response to information, never in the same turn as it.
+6. `<tool>` inline where it is used, with when/how to call and how to use the result.
 
-Three categories:
+Then the self-review in SKILL.md and `scripts/validate_v2.py`.
 
-1. **System variables** — always include the required set: `current_time`, `current_date`, `current_day`, `current_timestamp`, `agent_gender`, `agent_personality`, `dialled_phone_number`, `conversation_id`.
-2. **User-defined variables** — carry the single prompt's fixed values as `user_defined`. E.g. `full_name`, `agent_name`, product-specific data.
-3. **Extracted variables** — ONLY for routing or cross-boundary state. If a fact never gates a transition and never crosses a scenario boundary, it stays in-context.
+## Step 7: parity trace
 
-Every variable referenced in:
+Walk 8-10 caller paths through both versions, turn by turn, and check what the model would see each turn
+(`runtime_and_latency.md` §2): happy path; refusal; busy/callback; wrong person; FAQ mid-flow; "talk to a human";
+correction of an earlier answer; an answer of the wrong type ("maybe" for a boolean); a split-turn intent
+("tell me my nominee" → "which policy?" → "yes, that one"); caller switches language mid-call.
 
-- Jinja templates (`{{ var }}`, `{% if var %}`)
-- Transition conditions (`when.var`)
-- Extract keys
+## v1 → v2 mapping
 
-...MUST be declared in `variables_schema`.
+A v1 bot can't be switched to v2 in place (the API rejects it). Re-author into a new v2 bot (or a fresh scenario
+bot), then move traffic.
 
-## Step 6 — Author each scenario
-
-For each scenario write:
-
-### `type`
-
-Always `"single_prompt"`.
-
-### `prompt`
-
-- Open with the step's behaviour description.
-- Use `<say lang="...">` for locked/scripted lines — always bilingual, and **one block per language**: a multi-sentence line goes inside a single `<say>`, never one `<say>` per sentence.
-- Use Jinja `{% if/elif/else %}` for conditional wording only (not routing).
-- Jinja string comparisons use `\"` escaping: `{% if var == \"value\" %}`.
-- Jinja existence checks use `is defined`: `{% if var is defined %}`.
-- Attach scenario tools at the end of the prompt using `<tool_name>tool_name</tool_name>` tags, matching the `tools` array in exact name and order.
-
-### `extract`
-
-- Only routing/cross-boundary variables.
-- Each entry: `"var_name": "Crisp instruction. Set to 'X' when Y. Leave unset otherwise."`.
-- Values are always strings: `"true"`, `"false"`, `"accepted"`, etc.
-
-### `transitions`
-
-- Ordered list; first match wins.
-- Each transition has `go_to` + exactly one of `when` or `when_llm`.
-- Every transition should have a bilingual `deterministic_exit_cue`.
-- Operators: `EQUALS`/`NOT_EQUALS` (with string value), `EXISTS`/`NOT_EXISTS` (no value field).
-- Put most specific/deterministic transitions first.
-- Terminal scenarios: `"transitions": []`.
-
-**Split-turn intent (CRITICAL for routing/dispatch scenarios):** If this scenario gathers TWO pieces of info before routing (e.g. which entity + what topic), callers will almost always split them across turns — stating intent first, then confirming the entity. You MUST use extracted variables + deterministic `when` conditions here, NOT `when_llm`. A `when_llm` like "the caller asks about X" will fail on a bare confirmation turn ("ji haan") because the current utterance doesn't mention the topic. See Rule 14 in SKILL.md and the split-turn pattern in `patterns.md`.
-
-### `tools`
-
-- Array of tool name strings matching the `<tool_name>` tags in `prompt` in name and order. Empty `[]` if no tools.
-
-## Step 7 — Validate before returning (no API calls — self-check only)
-
-Run the checklist from the main SKILL.md:
-
-1. Valid JSON.
-2. `start` exists in `scenarios`.
-3. Every `go_to` points to a real scenario.
-4. No orphan scenarios.
-5. Operators correct: `EQUALS`/`NOT_EQUALS` with string value, `EXISTS`/`NOT_EXISTS` without value.
-6. `type: "single_prompt"` on every scenario.
-7. global_prompt keys are snake_case.
-8. Global transition `go_to` targets are unique.
-9. No `signal` on global transitions.
-10. Bilingual say blocks and cues — exactly one `<say>` per language per branch.
-11. Standard Jinja only (no `is_filled`, no custom functions).
-12. System variables declared.
-13. All referenced variables declared.
-14. Exit cues on every transition.
-15. Tool tags in `prompt` (`<tool_name>...</tool_name>`) match the `tools` array in name and order.
-
-## Step 8 — Parity self-test
-
-Pick 6-10 representative customer inputs and trace both versions:
-
-- Normal happy path.
-- A refusal with reason.
-- A busy/callback.
-- An FAQ mid-flow.
-- An edge case the single prompt guarded.
-- A wrong number / DND.
-- **A split-turn intent test:** user states intent in Turn 1 (e.g. "tell me my nominee name"), bot asks for entity confirmation, user gives a bare confirmation in Turn 2 (e.g. "ji haan" / "yes"). Verify the transition fires and the correct tool is called — this is the most common failure mode for routing scenarios that use `when_llm` instead of deterministic `when`.
-
-If the scenario version answers as well or better on each, you're done.
+| v1 | v2 |
+|---|---|
+| scenario object `{type, prompt, extract, transitions, tools}` | one string |
+| `"type": "single_prompt"`, `"name"` at top level | delete |
+| `extract: {var: "instruction"}` | `<update var="var"/>` placed after the sentence that says when; instruction text → variable `description` |
+| extracted values `"true"`/`"false"` strings | `boolean` type, `EQUALS true` unquoted |
+| `when: {"var":"x","op":"EQUALS","value":"a"}` | `when="x EQUALS 'a'"` (or bare value for number/boolean) |
+| `{"and":[…]}` / `{"or":[…]}` | `a AND b` / `a OR b`, brackets to mix |
+| `when_llm: "…"` on a scenario transition | sentence + `<transition type="inline" go_to="x" mode="llm"/>` |
+| `deterministic_exit_cue: {lang: text}` | `<filler><text lang="…">…</text></filler>`; global: `"filler": "<text …>…</text>"` (no `{{var}}`) |
+| `{% if x is defined %}…{% else %}…{% endif %}` | `<if when="x EXISTS">…</if><else>…</else>` |
+| `{% if x == "a" %}` | `<if when="x EQUALS 'a'">` |
+| `<say lang="hi-IN">…</say>` | `<say><text lang="hi-IN">…</text></say>`, one `<say>` holding all languages |
+| gendered Hindi line | `<text lang="hi-IN"><male>…</male><female>…</female></text>` |
+| `<tool_name>x</tool_name>` + `"tools": ["x"]` | `<tool name="x"/>` inline where it's used |
+| v1 variable `{source, description}` | add `type`; system/user_defined → `text` |
+| `transitions: []` (terminal) | a scenario with no transitions |
+| `signal` | not supported; end/transfer go through the platform's tools and end-call rules |
