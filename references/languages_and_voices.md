@@ -17,7 +17,7 @@ Consequences:
 - Write a `<text>` for **every** bot language in every `<say>`/`<filler>`. Only the primary is enforced; a missing
   one silently speaks the primary-language line to a caller in another language.
 - A `<say>` costs no model call when everything shown in the scenario is `<say>` lines and no exit is shown
-  (see `runtime_and_latency.md`).
+  (see `runtime.md` §8).
 - The same bot can be re-voiced (male ↔ female persona) without editing the config, as long as gendered lines
   are written as pairs.
 

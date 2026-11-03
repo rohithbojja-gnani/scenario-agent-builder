@@ -8,10 +8,10 @@ Mirrors the save-time validator of genvoice_backend_v1 (main/scenario_v2/*), plu
 Standard library only.
 
 usage:
-  python3 validate_v2.py CONFIG.json --langs en-IN,hi-IN [--tools a,b] [--greeting TEXT] [--ending TEXT]
+  python3 scripts/check_v2.py CONFIG.json --languages en-IN,hi-IN [--tools a,b] [--greeting TEXT] [--ending TEXT]
 
 CONFIG.json may be the scenario_config itself, or a bot_config holding it under "scenario_config".
---langs: the bot's languages, primary first. --tools: the bot's action names (omit to skip TOOL_MISSING).
+--languages: the bot's languages, primary first. --tools: the bot's action names (omit to skip TOOL_MISSING).
 Exit code 1 when there are errors. Warnings never fail.
 """
 import argparse
@@ -486,6 +486,8 @@ class Checker:
             seen.setdefault(lang, t)
             if self.langs and lang not in self.langs:
                 self.rep.warn("LANGUAGE_NOT_CONFIGURED", f"{lang} is not one of the bot's languages.", t.path, t.line)
+        if self.langs and texts and self.langs[0] in seen and (texts[0].attrs.get("lang") or "").strip() != self.langs[0]:
+            self.rep.warn("PRIMARY_NOT_FIRST", f'Put <text lang="{self.langs[0]}"> first: the editor keeps the first line of a filler.', box.path, box.line)
         if self.langs and self.langs[0] not in seen:
             self.rep.error("PRIMARY_LANGUAGE_MISSING", f'Every <{box.tag}> needs <text lang="{self.langs[0]}">.', box.path, box.line)
         missing = [lang for lang in self.langs[1:] if lang not in seen]
@@ -753,12 +755,17 @@ class Checker:
         self.targets.add(start)
         for key, text in self.cfg["global_prompt"].items():
             self.plain(text, f"global_prompt.{key}")
+        interrupt_targets = {}
         for name, gt in (self.cfg.get("global_transitions") or {}).items():
             base = f"global_transitions.{name}"
             self.links(gt["when_llm"], f"{base}.when_llm")
             self.plain(gt["when_llm"], f"{base}.when_llm")
             if gt["go_to"] not in self.scenarios:
                 self.rep.error("SCENARIO_MISSING", f"go_to '{gt['go_to']}' does not exist.", f"{base}.go_to")
+            if gt["go_to"] in interrupt_targets:
+                self.rep.error("DUPLICATE_GLOBAL_TARGET", f"'{gt['go_to']}' is already the target of "
+                               f"'{interrupt_targets[gt['go_to']]}' (the editor allows one interrupt per target).", f"{base}.go_to")
+            interrupt_targets.setdefault(gt["go_to"], name)
             self.targets.add(gt["go_to"])
             if "filler" in gt:
                 root = parse_fragment(gt["filler"], "filler", f"{base}.filler", self.rep)
@@ -825,7 +832,7 @@ def validate(cfg, langs=None, tools=None, greeting=None, ending=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("config")
-    ap.add_argument("--langs", default="", help="bot languages, primary first, e.g. en-IN,hi-IN")
+    ap.add_argument("--languages", "--langs", dest="langs", default="", help="bot languages, primary first, e.g. en-IN,hi-IN")
     ap.add_argument("--tools", default=None, help="bot action names; omit to skip TOOL_MISSING")
     ap.add_argument("--greeting")
     ap.add_argument("--ending")
@@ -839,7 +846,7 @@ def main():
     a.ending = a.ending if a.ending is not None else cfg.get("end_message")
     tools = None if a.tools is None else [x.strip() for x in a.tools.split(",") if x.strip()]
     if not langs:
-        print("note: --langs not given, language rules skipped", file=sys.stderr)
+        print("note: --languages not given, language rules skipped", file=sys.stderr)
     rep = validate(cfg, langs, tools, a.greeting, a.ending)
     for kind, items in (("ERROR", rep.errors), ("WARN", rep.warnings)):
         for code, path, line, msg in items:

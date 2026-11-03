@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-check for validate_v2.py: python3 scripts/test_validate_v2.py
+"""Self-check for check_v2.py: python3 scripts/test_check_v2.py
 
 The example bot must be clean; each mutation must raise exactly the listed codes. Backend codes were confirmed
 against genvoice_backend_v1's own validator (main/scenario_v2) on 2026-11-03."""
@@ -10,7 +10,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from validate_v2 import validate  # noqa: E402
+from check_v2 import validate  # noqa: E402
 
 BOT = json.load(open(os.path.join(HERE, "..", "assets", "example_emi_v2.json"), encoding="utf-8"))
 LANGS, TOOLS = BOT["bot_language"], ["check_payment_status", "send_payment_link"]
@@ -67,6 +67,8 @@ CASES = {  # name: (mutation, expected error codes, expected warning codes)
     "FE mixed voices": (add('<say><text lang="en-IN">Hi</text><text lang="hi-IN"><male>हाय</male><female>हाय</female></text></say>'), {"FE_MIXED_VOICES"}, set()),
     "FE pruned var": (lambda c: (c["variables_schema"].__setitem__("segment", {"source": "user_defined", "type": "text", "description": "x"}),
                                  add("<if when=\"segment EQUALS 'gold'\">Thank them.</if>")(c)), {"FE_VARIABLE_PRUNED"}, set()),
+    "duplicate interrupt target": (put(["global_transitions", "stop_calling", "go_to"], "callback"), {"DUPLICATE_GLOBAL_TARGET"}, {"UNREACHABLE_SCENARIO"}),
+    "primary not first": (put(["global_transitions", "callback_request", "filler"], EN_HI.split("</text>")[1] + "</text>" + EN_HI.split("</text>")[0] + "</text>"), set(), {"PRIMARY_NOT_FIRST"}),
     "say-only closing": (put(["scenarios", "wrong_person"], "<say>" + EN_HI + "</say>"), set(), {"LINT_SAY_ONLY"}),
     "stop word": (add('<say><text lang="en-IN"><male>Note: hi</male><female>Note: hi</female></text><text lang="hi-IN"><male>हाय</male><female>हाय</female></text></say>'), set(), {"LINT_STOP_WORD"}),
 }

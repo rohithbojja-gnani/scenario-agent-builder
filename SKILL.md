@@ -1,150 +1,174 @@
 ---
 name: scenario-agent-builder
 description: >
-  Build Inya scenario-based voice agents (scenario_config version 2: XML scenario strings, typed variables,
-  one-line when conditions, male/female and per-language lines). Use to convert a single-prompt bot or a v1
-  scenario bot into v2, author one from scratch, edit or review an existing scenario_config, translate its spoken
-  lines, fix its validation errors, or optimise it for latency and KV cache.
+  Build or convert scenario-based voice agents in the scenario_config version 2 format (one XML-ish string per
+  scenario, typed variables, one-line `when` conditions, global interrupts). Use when the user gives a
+  single-prompt voice bot, a version 1 scenario_config (scenario objects with prompt/extract/transitions, Jinja,
+  `<say lang>`), or a description, and asks to convert, migrate, "make it scenario based", or author a scenario
+  agent, add male/female or per-language lines, or tune one for latency and prompt caching. Outputs a complete
+  scenario_config that passes the bot builder, the save-time validator and the runtime.
 ---
 
-# Scenario agent builder (v2)
+# Scenario-Based Voice Agent Builder (version 2)
 
-You produce a `scenario_config` that passes the backend (genvoice_backend_v1) and the editor (genvoice_app_frontend)
-on the first save, runs on the v2 engine (genvoice_backend), and answers at least as well as the source prompt
-(**parity**) with the least per-turn latency.
+## Working rules
 
-**Version check first.** A stored config with a `version` key is v2: follow this file. A stored config without
-`version` is a v1 bot; a bot can't change version, so edit it with `references/v1/rules.md` (and stop here), or
-re-author it as a new v2 bot (conversion_playbook.md, "v1 → v2 mapping"). New bots are always v2.
+- Work in one pass in the main context. Read references as needed:
+  - `references/v2_format.md` — **always, before writing JSON**.
+  - `references/runtime.md` — how a turn runs; read before designing moves, fillers, state and tool use.
+  - `references/conversion_playbook.md` — for any conversion (single prompt or version 1).
+  - `references/patterns.md` — ready-made shapes and the anti-pattern table.
+  - `references/variables.md` — choosing sources and types.
+  - `references/validation.md` — every error code and editor quirk; read when fixing errors.
+  - `references/languages_and_voices.md` — line selection, male/female pairs, translation style; read before
+    writing any `<say>` or filler.
+  - `references/v1_schema.md` — only to read a version 1 input.
+- Validate offline, never through external APIs: `python3 scripts/check_v2.py <file.json> --languages <primary,other>
+  --tools <actions> --greeting "<greeting>"` and fix every error; fix each warning or say why it stays. The checker
+  matches the save-time validator's codes and adds editor (`FE_*`) and runtime (`LINT_*`) checks. Without Python,
+  use the checklist at the end. `assets/example_emi_v2.json` is a complete bot that passes with no warnings; copy
+  its shapes. After changing the checker, run `python3 scripts/test_check_v2.py`.
+- **No real customer names, phone numbers, account numbers or other personal data in examples or test values**;
+  use placeholders ([BANK_A], [CUSTOMER]).
+- After the JSON, state assumptions in a few lines: languages and which is primary, tool names, scenarios
+  split or merged, scripted lines fixed, behaviours that changed from the source, missing approved texts
+  marked `[TO CONFIRM]`, and compliance points to review.
 
-References (read when the step says so):
-- `references/v2_format.md`: exact format, every save-time rule, limits, error code → fix. Read before writing JSON.
-- `references/runtime_and_latency.md`: what the model sees each turn, the KV-cache layout, where latency goes.
-- `references/languages_and_voices.md`: line selection, male/female, translation house style.
-- `references/patterns.md`: tested scenario patterns and anti-patterns.
-- `references/conversion_playbook.md`: decomposition method, parity trace, v1 → v2 mapping.
-- `assets/example_emi_v2.json`: a complete bot that passes every check; copy its shapes.
-- `scripts/validate_v2.py`: offline validator (backend rules + editor rules + runtime lints).
+## Output
 
-Work in one pass in the main context. No subagents, no external API calls.
+```jsonc
+{
+  "version": 2,
+  "start": "greeting",
+  "global_prompt": {"persona": "…", "context": "…", "conversation_style": "…", "guardrails": "…", "shared_rules": "…"},
+  "variables_schema": {"customer_name": {"source": "user_defined", "type": "text", "description": "…"}},
+  "global_transitions": {"reschedule": {"when_llm": "…", "go_to": "callback", "filler": "<text lang=\"hi-IN\">…</text><text lang=\"en-IN\">…</text>"}},
+  "scenarios": {"greeting": "Ask if you are speaking with {{customer_name}}. <update var=\"identity_confirmed\"/> …"}
+}
+```
 
-## Steps
+No `name` key. `bot_config.agent_type` is `scenario_based`. Deliver the greeting (`initial_message`) with it: the
+greeting is played without the model before any scenario runs. A version 1 bot can't be switched to version 2 by
+saving it: the version 2 config goes into a new agent.
 
-### 1. Inputs
-Collect, in one message to the user if missing: the source prompt; bot languages with the **primary first**; voice
-genders the bot may use; exact action (tool) names; campaign/CRM fields per call; greeting and ending message;
-the domain (BFSI/RBI, insurance/IRDAI, health, outbound/TRAI).
-**Done when** each item is known or written down as a stated assumption.
+## Mental model
 
-### 2. Map the source
-Read the whole source (`conversion_playbook.md` steps 1-3). Sort every behaviour into exactly one home:
-`global_prompt` section (static: persona, facts, FAQs, policy, style, language rules) · interrupt (can happen
-anywhere and needs its own flow) · scenario (one conversational job) · `<say>` (exact wording) · guardrail.
-**Done when** every sentence of the source has a home in this map, and you can name the scenario list and
-the interrupt list (3-6).
+- A scenario is **one string**: plain-text instructions plus a few tags — `<update var>` (report a variable),
+  `<tool name>`, `<say>` (fixed line), `<transition>` (move), `<if>/<elif>/<else>` (branch).
+- Each turn the model sees a cached head (fixed rules, global prompt sections, interrupts) and the **current
+  scenario only**, with Ifs resolved, values filled in and tags turned into short instructions. It replies, then
+  optionally writes a control block of reports. The runtime captures the reports and decides the move.
+- On a move, the held reply is replaced by the transition's filler and the **next scenario answers the same
+  customer turn**; that first reply can speak and use tools but can't report or move.
+- The model sees only values that are shown (`[name]` in the head, `{{name}}` in the scenario). Show decision
+  state with `<if>` or a STATE line.
+- **Cost model**: the head is cached across turns and calls; the rendered scenario is re-sent uncached every turn;
+  the reply is generated in full before it is spoken whenever a move is possible; every move adds a second serial
+  model call. Details: `references/runtime.md` §9.
 
-### 3. Variables
-`user_defined` for campaign data (always `text`), `system` for the platform's nine, `extracted` only for values
-that a `when` tests or a later scenario reads, with the tightest type (`boolean`, `enum` of 2-10 snake_case
-values, `number`/`decimal` only if compared, else `text`). Every variable gets a one-line description written
-for the model (what, format, when to set).
-**Done when** each extracted variable has a named reader (a `when` or a later scenario).
+## Hard limits (a save over a limit fails)
 
-### 4. global_prompt (the cached head)
-Sections in this order: `persona`, `context`, `conversation_style`, `guardrails`, then extras (`language_rules`,
-`faq`, `compliance`…). Everything true on every turn goes here once; per-call data only as `{{var}}`.
-`conversation_style` sets reply length (1-2 short sentences: replies are buffered, length = time to first audio)
-and the voice-gender rule for gendered languages. `guardrails` holds domain/compliance rules and the transfer
-rule only: the platform head already covers prompt injection, not revealing instructions, model identity and
-ending with `| EOC`. AI disclosure goes in `persona` and the greeting.
-**Done when** no scenario repeats a fact, FAQ or style rule, and every section is ≤ 3000 chars of plain text.
-
-### 5. Scenarios
-Write each scenario as one string, top to bottom: goal line → `<say>` if any → instructions with each
-`<update>` right after the sentence that says when → `<if>` branches → exits. Rules in "Core rules" below.
-The `start` scenario answers the caller's reply to the greeting; it never greets again.
-**Done when** every scenario has a job, every waiting If has an `llm` escape, every move has a filler (unless its
-target is a terminal that needs none), and every scenario is under ~2500 chars of text.
-
-### 6. Spoken lines
-Every `<say>`, `<filler>` and global `filler`: one `<text>` per bot language, each a `<male>` + `<female>` pair,
-written in the house style (`languages_and_voices.md` §3). The pair differs only where the language marks the
-speaker's gender (Hindi, Marathi, Gujarati, Punjabi, Urdu, Arabic); otherwise identical.
-**Done when** every line exists in every bot language and both voices, and every first-person verb in a gendered
-language has been checked.
-
-### 7. Validate
-Write the bot to a file and run
-`python3 scripts/validate_v2.py bot.json --langs en-IN,hi-IN --tools a,b --greeting "…"` (a bot_config-shaped
-file with `bot_language` and `initial_message` needs no flags). Fix every error. Fix every warning or state why
-it stays. Without code execution, check `v2_format.md` §10 and the Core rules line by line instead.
-**Done when** the validator prints `0 error(s)` and each remaining warning has a stated reason.
-
-### 8. Parity trace
-Trace 8-10 caller paths turn by turn (`conversion_playbook.md` step 7), reading each turn as the model sees it
-(`runtime_and_latency.md` §2): what is shown, what can be reported, what moves, what the caller hears (a move
-replaces that turn's reply with the filler).
-**Done when** every path reaches a closing or transfer, no information the caller needs is spoken in a turn that
-moves, and the scenario bot does at least what the source did on each path.
-
-### 9. Deliver
-1. The bot as JSON: `{"agent_type": "scenario_based", "bot_language": [...], "initial_message": "...",
-   "scenario_config": {...}}`. `scenario_config` pastes into the editor's JSON view as is (or
-   `overview.scenarioConfig` of `update_bot/v3`); greeting/ending go in the bot's message fields.
-2. The validator result.
-3. Assumptions (languages, tool names, field names) and items marked `[TO CONFIRM]`: compliance wording,
-   regulatory regime, fees, timelines, any fact not in the source. Recommend Compliance review for BFSI,
-   insurance, health and outbound calling.
-4. The parity notes: what changed versus the source and why.
-
-## Core rules
-
-**Shape.** `scenario_config` = `version` (2), `start`, `global_prompt`, `variables_schema`, `global_transitions`
-(`{when_llm, go_to, filler?}`), `scenarios` (name → string). Nothing else: no `name`, scenario objects,
-`extract`, `tools` arrays, `deterministic_exit_cue`, `signal`, `<tool_name>`, Jinja. Names: lowercase `a-z0-9_`
-(or Japanese), 3-64 chars, starting with a letter; meaningful, since the model sees scenario and exit names.
-
-**Scenario tags.** `<update var="x"/>` · `<tool name="x"/>` · `<say>` → `<text lang>` → `<male>`/`<female>` ·
-`<if when>` `<elif when>` `<else>` (directly adjacent, never empty, ≤ 3 deep) · transitions:
-
-| Transition | Fires |
+| Item | Limit |
 |---|---|
-| `If <observable condition> → <transition type="inline" go_to="x" mode="llm"/>` | the model reports the exit |
-| `<transition type="inline" go_to="x" mode="auto"/>` alone in an If branch | the branch is taken |
-| `<transition type="variable" go_to="x" mode="auto" when="…"/>` | `when` holds after this turn's captures |
+| Scenario text | **5000 characters**: instructions + every `<say>` line in every language and voice (tags and filler text not counted) |
+| One spoken line | 1000 characters |
+| Global prompt section | 3000 characters, newlines not counted |
+| Scenarios / variables / interrupts | 100 / 100 (system included) / 50 |
+| Enum options | 2 to 10, ≤ 64 characters, letters/digits/space/`_`/`-` |
+| `when` | 10 conditions, one joiner (AND or OR); brackets only as `(…) AND (…)`, one level (editor) |
+| If nesting | 3 levels |
+| `when_llm`, global `filler` | 1000 characters |
+| Description | 256 characters |
 
-Optional `<filler>` inside a transition (no `{{var}}` in fillers). Escape `&` → `&amp;`, `<` → `&lt;`. No URLs, no
-comments, no `<u>`. `{{var}}` is allowed in text and `<say>` lines.
+## The rules that make a version 2 config correct
 
-**when.** `var OP value`, ops UPPERCASE: `EQUALS NOT_EQUALS GREATER_THAN GREATER_OR_EQUAL LESS_THAN LESS_OR_EQUAL
-EXISTS NOT_EXISTS`. Strings `'quoted'`, numbers and `true`/`false` bare. Text (all campaign data): EQUALS/
-NOT_EQUALS only; boolean: `EQUALS true|false` only. One joiner per level. Editor-safe: enum values in their
-declared case; `a EQUALS 'x' OR a EQUALS 'y'` instead of `IN`; brackets one level deep with every top-level part
-bracketed, `(…) AND (…)`. A variable used only as the first operand of an `<if>`/`<elif>` is deleted by the
-editor on Save: reference it elsewhere too (`v2_format.md` §8a).
+1. **Shape.** Only the six top-level keys. Scenario values are strings. Global transitions are exactly
+   `{when_llm, go_to, filler?}`. Core global prompt sections: `persona`, `context`, `conversation_style`,
+   `guardrails`; add extra sections for shared rules.
+2. **XML.** Each scenario, wrapped in `<scenario>`, is well-formed XML using only the version 2 tags and
+   attributes. Avoid raw `&` and `<` in text (write "and", "before"). No comments, no links, no `<u>`.
+3. **Templates.** Only `{{name}}` (no spaces, no filters, no Jinja), and only declared names. `{{name}}` is
+   allowed in instruction text and `<say>` lines; **never in a `<filler>` or global `filler`**. The global prompt is
+   plain text: no tag-like `<Heading>` text, no `[bracketed words]` other than variables.
+4. **Variables.** `system` (the nine platform variables) and `user_defined` (campaign data) are `text`.
+   `extracted` variables are typed: `boolean` flags, `enum` for 2–10 categories (never number- or boolean-looking
+   options), `text` for dates, names and long code lists. Never `<update>` a system variable.
+5. **Transitions.**
+   - `type`, `go_to` and `mode` are always present.
+   - A `variable` transition is `auto` and has a `when`.
+   - An `inline` transition has no `when`.
+   - An `llm` transition has no `when`; write it after the sentence that says when to take it.
+   - An inline transition is `auto` **only when it is alone in an If branch**; anywhere else it is `llm`.
+   - A transition never goes to its own scenario.
+   - The first transition that fires, in written order, wins.
+6. **Conditions.** Operators by type (booleans: EQUALS only; text: EQUALS/NOT_EQUALS; enum: EQUALS/NOT_EQUALS/
+   IN/NOT_IN; numbers: comparisons; any: EXISTS/NOT_EXISTS). Quote strings, never booleans or numbers. Conditions
+   on unanswered extracted variables **wait**; `<else>` means "answered, nothing matched". Editor-safe forms: enum
+   values spelled exactly as declared; `x EQUALS 'a' OR x EQUALS 'b'` instead of a multi-value `IN`. A variable
+   whose only use is the first operand of an `<if>`/`<elif>` is deleted by the editor on save: use it elsewhere too.
+7. **Spoken lines and fillers.** One `<text>` per language, the **primary language first and always present**,
+   every bot language covered, no empty lines, and **every `<text>` a `<male>` + `<female>` pair** (identical where
+   the language doesn't mark the speaker's gender; the editor drops plain lines next to paired ones). Write in the
+   platform's spoken style (`references/languages_and_voices.md`). Fillers: 2–6 words, natural, on every
+   transition where an acknowledgement fits.
+8. **Size.** Budget every scenario under ~4800 characters: shared rules go into extra global prompt sections;
+   repeated WRONG/RIGHT lists are trimmed; variants become prefix + shared core; big jobs are split.
+9. **Openings belong to the destination.** A scenario's first line is under "WHEN THIS SCENARIO STARTS" in that
+   scenario; the scenario before it never speaks it (its reply is discarded on the move). The call's first line is
+   the greeting; `start` answers the caller's reply to it and never greets again.
+10. **Report outcomes on the deciding turn.** Dispositions and outcome flags are reported with the flag that
+    triggers the move; a closing scenario's single reply can't report.
+11. **Never instruct silence** ("emit no spoken text"); let the move replace the reply.
+12. **Tools.** `<tool name>` where the tool applies, inside the branch that needs it. Call tools directly (no
+    "let me check" line before them), answer from the result, put reports after the final answer, never write a
+    tool call as text. Transfer to an agent by calling the transfer tool silently, never `| TTA` or a spoken
+    "connecting you". Tool calls and results stay in the history. A tool inside a branch changes the tools array as
+    the branch flips, which misses the prompt cache: keep it at the scenario's top level unless it must not be
+    callable elsewhere.
+13. **Interrupts** only for true "from anywhere" exits, one per target scenario; broad interrupts preempt scenario
+    routes.
+14. **Verbatim lines** are said once per call; give the short re-ask to use instead of repeating them. A `<say>`
+    is shown on every turn its scenario is current: move on the answer, or guard it with `NOT_EXISTS`.
+15. **Endings.** A closing line ends with `| EOC`. No `signal`. A closing scenario always has an instruction line: a
+    scenario showing only `<say>` lines is spoken without the model and never ends the call. No `Note:` in spoken
+    lines (it is the model's stop sequence).
+16. **Latency.** Everything static (persona, facts, FAQs, style, language rules) goes in global prompt sections,
+    which are cached; scenarios stay short (the checker warns past 2500 characters); descriptions are one line;
+    replies are 1–2 short sentences (they are generated in full before speaking); interrupts are few; branch with
+    `<if>` instead of pass-through scenarios. Don't restate the platform head (security guidelines, `| EOC` rule):
+    `guardrails` holds domain and compliance rules.
 
-**Waiting.** A comparison on an unanswered `extracted` variable waits: the If shows no branch and the model is
-asked for the value; it decides in the turn the answer arrives. `EXISTS`/`NOT_EXISTS` never wait. `<else>` means
-answered-and-no-match; "not answered" is `NOT_EXISTS`. Every waiting If needs an `llm` escape for refusals.
+## Procedure
 
-**Moves.** One per turn; interrupts first, then transitions top to bottom. A move discards the reply generated in
-that turn: the caller hears the filler, then the new scenario's reply (an extra serial LLM call). So information
-is spoken in one turn and the exit fires on the caller's next turn; fillers are 2-6 word bridges.
+**Single prompt → version 2**: spine and cross-cutting layer → scenarios by conversational job → interrupts →
+global prompt (+ shared sections) → variables → scenario strings → size budget → validate → trace 8–10 test
+inputs. Details: `references/conversion_playbook.md` §A.
 
-**`<say>`.** Shown as SAY EXACTLY on every turn the scenario is current, so use it where the scenario moves on
-the next answer, or guard it with `NOT_EXISTS`. A scenario showing only `<say>` lines is spoken without the
-model: fast, but it can't end the call or catch interrupts, so never make a closing scenario say-only. Closing
-scenarios: one instruction ("thank them, say goodbye and end the call"), no transitions. No `Note:` in lines (stop
-sequence).
+**Version 1 → version 2**: map each field (playbook §B1), then fix version 1 workarounds that break in version 2
+(playbook §B2: openings spoken by the previous scenario, "emit no spoken text", dispositions inside closing
+scenarios, plain-text variable gates, `NOT_EQUALS true` on flags, nested and/or groups, Jinja, `<say lang>`,
+`<tool_name>` tags), then budget, validate and trace.
 
-**Latency and KV cache** (`runtime_and_latency.md`). The head (fixed platform text + global_prompt + interrupts)
-is cached across turns and calls; the scenario text, variable values and descriptions are re-sent uncached every
-turn. So: static content in `global_prompt`, short scenarios, one-line descriptions, few interrupts, few hops
-(branch with `<if>` instead of pass-through scenarios), tools only where needed and at the scenario's top level
-(a changing tools array misses the cache from the first token).
+**From a description**: confirm or assume languages (primary first), tool names, campaign variables, outcomes to
+record and compliance lines; then as above.
 
-**Transfer.** "Call the transfer tool" in guardrails or the scenario. No spoken "connecting you", no `| TTA` text,
-no broad "anything hard → agent" interrupt. The platform adds the TTA tool every turn when transfer is set up.
+## Pre-return checklist
 
-**Data.** Use placeholders (`[CUSTOMER]`, `[BANK_A]`) for any real customer or deal detail in examples. If the
-user pastes raw call recordings, transcripts or customer identifiers, flag it and work from de-identified text.
+1. Valid JSON; only `version` (2), `start`, `global_prompt`, `variables_schema`, `global_transitions`, `scenarios`.
+2. `start` and every `go_to` are scenarios; no self-transitions; every scenario reachable; one interrupt per target.
+3. Every scenario's text ≤ 5000 characters and well-formed XML with version 2 tags only; no raw `&`/`<`; no
+   comments; no links.
+4. Every `{{name}}`, `<update var>` and `when` name declared; no `{{name}}` in fillers.
+5. Core global prompt sections present; every section ≤ 3000 characters; no tags in the global prompt or `when_llm`.
+6. `system`/`user_defined` are `text`; enums have 2–10 safe options; descriptions ≤ 256 and non-empty; no system
+   variable updated; no extracted variable that is never asked or tested.
+7. Transitions follow the type/mode/when and placement rules; conditions use allowed operators and typed values;
+   ≤ 10 conditions; one joiner per level; no multi-value `IN`; enum values as declared.
+8. Every `<say>`/filler has the primary language first and every bot language, each `<text>` a male/female pair.
+9. Openings in the destination scenarios; outcomes reported on deciding turns; no "say nothing" instructions;
+   decision state visible (STATE line or `<if>`).
+10. Tools only where used and only the bot's real action names; transfer via the tool without a spoken line.
+11. Scripted lines kept word for word (fixes listed); missing approved texts marked `[TO CONFIRM]`.
+12. Compliance: AI disclosure in the opening; no threats; calling windows; DND honoured; no data to third parties.
+13. Greeting delivered; `start` doesn't greet again; closing scenarios aren't say-only.
+14. `scripts/check_v2.py` reports 0 errors, and every remaining warning is explained.

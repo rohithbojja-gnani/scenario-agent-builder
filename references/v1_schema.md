@@ -1,16 +1,16 @@
-# scenario_config -- Authoritative Schema
+# scenario_config version 1 -- legacy schema (read-only)
 
-This is the platform contract for `bot_config.scenario_config`. Match it exactly. Load this before writing JSON.
+Version 1 is the format without a `version` key: scenarios are objects with `prompt`, `extract`, `transitions` and `tools`. Use this file only to **read** a version 1 config you are converting. New agents and conversions are written in version 2 (`references/v2_format.md`); an existing version 1 bot can't be switched to version 2 by saving, so the version 2 config goes into a new agent.
 
 ## Top level: ScenarioConfig
 
 | Field                | Type                          | Required       | Notes                                                                                                                                                                                 |
 | -------------------- | ----------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`               | string                        | **yes (FE)**   | Identifier for the config. Required by FE JSON schema; not in backend_v1 Pydantic model.                                                                                             |
+| `name`               | string                        | **yes (FE)**   | Identifier for the config. Required by FE JSON schema; not in save-time validator model.                                                                                             |
 | `start`              | string                        | **yes**        | Key of the entry scenario. Must exist in `scenarios`. Must be a valid identifier (`^[a-z][a-z0-9_]{2,63}$`).                                                                          |
-| `global_prompt`      | object                        | **yes**        | Required by both FE and backend_v1. Keys must be snake_case. Required sub-fields: `persona`, `context`, `conversation_style`, `guardrails`.                                           |
-| `variables_schema`   | dict[str, VariableDefinition] | **yes (FE)**   | FE JSON schema requires it; backend_v1 defaults to `{}`. Include it always.                                                                                                           |
-| `global_transitions` | dict[str, GlobalTransition]   | **yes (FE)**   | FE JSON schema requires it; backend_v1 defaults to `{}`. Include it always (use `{}` if none).                                                                                        |
+| `global_prompt`      | object                        | **yes**        | Required by both the editor and the save-time validator. Keys must be snake_case. Required sub-fields: `persona`, `context`, `conversation_style`, `guardrails`.                                           |
+| `variables_schema`   | dict[str, VariableDefinition] | **yes (FE)**   | The editor requires it; the validator defaults to `{}`. Include it always.                                                                                                           |
+| `global_transitions` | dict[str, GlobalTransition]   | **yes (FE)**   | The editor requires it; the validator defaults to `{}`. Include it always (use `{}` if none).                                                                                        |
 | `scenarios`          | dict[str, Scenario]           | **yes**        | The scenarios. At least one required. Keys must be valid identifiers.                                                                                                                 |
 
 ### global_prompt key and value rules
@@ -23,7 +23,7 @@ This is the platform contract for `bot_config.scenario_config`. Match it exactly
 **Required fields** (must be non-empty after trim):
 - `persona` -- who the agent is, brand, warmth, tone.
 - `context` -- call type, who the customer is, product details.
-- `conversation_style` -- language rules, length, acknowledgement style. Backend_v1 also accepts alias `conversationStyle`.
+- `conversation_style` -- language rules, length, acknowledgement style. The validator also accepts the alias `conversationStyle`.
 - `guardrails` -- compliance rules, scope limits.
 
 **Optional extra keys** (e.g. `language_rules`, `faq_reference`) are allowed but must follow identifier regex.
@@ -60,15 +60,15 @@ Campaign manager variables (when active): `outbound_attempt_number`, `outbound_c
 **Constraints:**
 
 - Global transitions are LLM-triggered only (no `when` rule-based conditions).
-- **No `signal` field** -- the `signal` field does not exist in the FE or backend_v1 authoring schema. The backend_v1 `GlobalTransition` model uses `extra="forbid"`, so including `signal` causes a Pydantic error.
+- **No `signal` field** -- the `signal` field does not exist in the editor or validator schema. The validator's global transition model forbids extra keys, so including `signal` causes a Pydantic error.
 - **Each `go_to` must be unique** within global_transitions -- no two global transitions can point to the same scenario. Create separate handler scenarios if needed.
 
 ## Scenario
 
 | Field         | Type                      | Required        | Notes                                                                                               |
 | ------------- | ------------------------- | --------------- | --------------------------------------------------------------------------------------------------- |
-| `type`        | string                    | **yes (FE)**    | Always `"single_prompt"`. Required by the frontend. Backend_v1 defaults it but FE needs it explicit. |
-| `prompt`      | string                    | **yes**         | Min 1 char (backend_v1). Behaviour + say blocks + Jinja + `<tool_name>` tags at end.                |
+| `type`        | string                    | **yes (FE)**    | Always `"single_prompt"`. Required by the frontend. The validator defaults it but the editor needs it explicit. |
+| `prompt`      | string                    | **yes**         | Min 1 char. Behaviour + say blocks + Jinja + `<tool_name>` tags at end.                |
 | `tools`       | array[string]             | no              | Tool names available in this scenario. Must match `<tool_name>` tags in `prompt` in name and order. |
 | `extract`     | dict[str,string]          | no              | `variable_name -> extraction instruction`. Runs every turn.                                         |
 | `transitions` | array[ScenarioTransition] | no              | Ordered; first match wins. Empty `[]` = terminal scenario.                                          |
@@ -93,7 +93,7 @@ When the full `bot_config` is available, cross-check that tool names exist in th
 | `when_llm`               | string \| null              | no       | AI-judged intent trigger. Use exactly one of `when` or `when_llm`.        |
 | `deterministic_exit_cue` | dict[str,string] \| null    | no       | Language-keyed cue. Should cover all bot languages.                       |
 
-**`signal` is NOT part of the authoring schema.** The FE has no signal field. The backend_v1 `ScenarioTransition` uses `extra="forbid"`, so including `signal` causes a Pydantic error. The `signal` field exists only in the runtime engine (`genvoice_backend`) and should not appear in authored configs unless explicitly targeting the runtime directly.
+**`signal` is NOT part of the authoring schema.** The editor has no signal field and the validator forbids extra keys, so `signal` is rejected.
 
 Use **exactly one** of `when` or `when_llm` per transition. Order transitions so the most specific/deterministic fire first.
 
@@ -116,10 +116,10 @@ Use **exactly one** of `when` or `when_llm` per transition. Order transitions so
 | `EXISTS`     | **Must be `null` or omitted**      | `{"var": "callback_time", "op": "EXISTS"}`                |
 | `NOT_EXISTS` | **Must be `null` or omitted**      | `{"var": "callback_time", "op": "NOT_EXISTS"}`            |
 
-- The FE serializes EXISTS/NOT_EXISTS with `"value": null`. The backend_v1 accepts either `null` or absent. Both are valid.
+- The editor writes EXISTS/NOT_EXISTS with `"value": null`. The validator accepts either `null` or absent. Both are valid.
 - **Never use**: `==`, `!=`, `exists`, `not exists` (wrong casing), `EQUALS` without value, `EXISTS` with a non-null value, `"value": true` (boolean -- values are always strings).
 
-### Condition limits (backend_v1)
+### Condition limits
 
 - Max `and`/`or` nesting depth: **2 levels**.
 - Max leaves per `and`/`or` array: **10**.
@@ -134,7 +134,7 @@ Use **exactly one** of `when` or `when_llm` per transition. Order transitions so
 
 - `and` = every child true; `or` = at least one true.
 - A group has `and` OR `or` (not both at one level).
-- Cap nesting at two levels (enforced by backend_v1).
+- Cap nesting at two levels.
 
 ## Canonical JSON shapes
 
@@ -197,12 +197,12 @@ Terminal scenario (no outgoing transitions):
 
 | Constraint | Limit | Enforced by |
 |---|---|---|
-| Identifier regex | `^[a-z][a-z0-9_]{2,63}$` | FE + backend_v1 |
-| global_prompt field max chars | 3000 (excl. newlines) | backend_v1 |
-| Variable description max | 256 chars | FE + backend_v1 |
-| Max variables | 100 | FE + backend_v1 |
-| `when` nesting depth | 2 levels | backend_v1 |
-| `when` leaves per group | 10 | backend_v1 |
-| Scenario prompt min | 1 char | backend_v1 |
-| `when_llm` min | 1 non-whitespace char | backend_v1 |
-| `go_to` min | 1 char | FE + backend_v1 |
+| Identifier regex | `^[a-z][a-z0-9_]{2,63}$` | editor + validator |
+| global_prompt field max chars | 3000 (excl. newlines) | validator |
+| Variable description max | 256 chars | editor + validator |
+| Max variables | 100 | editor + validator |
+| `when` nesting depth | 2 levels | validator |
+| `when` leaves per group | 10 | validator |
+| Scenario prompt min | 1 char | validator |
+| `when_llm` min | 1 non-whitespace char | validator |
+| `go_to` min | 1 char | editor + validator |
