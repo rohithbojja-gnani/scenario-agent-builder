@@ -8,7 +8,6 @@ error code.
 
 ```jsonc
 {
-  "version": 2,                       // the integer 2, required
   "start": "greeting",                // the scenario the call begins in
   "global_prompt": { ... },           // §2
   "variables_schema": { ... },        // §3
@@ -18,6 +17,9 @@ error code.
 ```
 
 - No other keys. `name` is rejected.
+- **`version`**: the stored config has `"version": 2`, but the editor's JSON view hides it and adds it on Validate
+  and Save, so the config you deliver leaves it out. Through the API it is required: today a config without
+  `version` is read as version 1. If present, it must be the integer 2.
 - `bot_config.agent_type` stays `"scenario_based"`.
 - **Names** (scenarios, variables, interrupts, extra global prompt sections): 3 to 64 characters, lowercase
   `a-z`, digits and `_` (Japanese characters are also allowed), starting with a letter. Example: `payment_collection`.

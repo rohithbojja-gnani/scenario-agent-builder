@@ -38,7 +38,6 @@ description: >
 
 ```jsonc
 {
-  "version": 2,
   "start": "greeting",
   "global_prompt": {"persona": "…", "context": "…", "conversation_style": "…", "guardrails": "…", "shared_rules": "…"},
   "variables_schema": {"customer_name": {"source": "user_defined", "type": "text", "description": "…"}},
@@ -47,9 +46,13 @@ description: >
 }
 ```
 
-No `name` key. `bot_config.agent_type` is `scenario_based`. Deliver the greeting (`initial_message`) with it: the
-greeting is played without the model before any scenario runs. A version 1 bot can't be switched to version 2 by
-saving it: the version 2 config goes into a new agent.
+Deliver exactly this object, as the editor's JSON view shows it: it starts with `"start"`, then `global_prompt`,
+`variables_schema`, `global_transitions`, `scenarios`. No `version` key (the editor adds `version: 2` on Validate
+and Save), no `name`, and no bot fields around it (`agent_type`, `bot_language`, greeting). Add `"version": 2` only
+when sending the config to the API yourself: today a config without `version` runs as version 1. The greeting is
+the bot's own field: if it should change, give it as one line after the JSON (it is played without the model
+before any scenario runs). A version 1 bot can't be switched to version 2 by saving it: the version 2 config goes
+into a new agent.
 
 ## Mental model
 
@@ -156,7 +159,8 @@ record and compliance lines; then as above.
 
 ## Pre-return checklist
 
-1. Valid JSON; only `version` (2), `start`, `global_prompt`, `variables_schema`, `global_transitions`, `scenarios`.
+1. Valid JSON starting with `"start"`; only `start`, `global_prompt`, `variables_schema`, `global_transitions`,
+   `scenarios` (no `version`, no bot fields).
 2. `start` and every `go_to` are scenarios; no self-transitions; every scenario reachable; one interrupt per target.
 3. Every scenario's text ≤ 5000 characters and well-formed XML with version 2 tags only; no raw `&`/`<`; no
    comments; no links.

@@ -356,8 +356,9 @@ class Checker:
         bad = lambda m, p="": e("SCHEMA_INVALID", m, p)  # noqa: E731
         for k in set(c) - TOP_KEYS:
             bad(f"'{k}' is not a supported field (no 'name', 'signal', 'type' on the config).", k)
-        if c.get("version") != 2 or isinstance(c.get("version"), bool):
-            bad("version must be the number 2.", "version")
+        # absent is fine: the editor's JSON view hides version and adds 2 on save
+        if "version" in c and (c["version"] != 2 or isinstance(c["version"], bool)):
+            bad("version must be the number 2 (or left out for the editor's JSON view).", "version")
         if not isinstance(c.get("start"), str) or not NAME_RE.match(c.get("start", "")):
             bad("start must be a valid scenario name.", "start")
         sc = c.get("scenarios")
