@@ -12,8 +12,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from check_v2 import validate  # noqa: E402
 
-BOT = json.load(open(os.path.join(HERE, "..", "assets", "example_emi_v2.json"), encoding="utf-8"))
-LANGS, TOOLS = BOT["bot_language"], ["check_payment_status", "send_payment_link"]
+CONFIG = json.load(open(os.path.join(HERE, "..", "assets", "example_emi_v2.json"), encoding="utf-8"))
+LANGS, TOOLS = ["en-IN", "hi-IN"], ["check_payment_status", "send_payment_link"]
+GREETING = "Hello, I am {{agent_name}}, an AI assistant calling from {{bank_name}}. Am I speaking with {{customer_name}}?"
 
 
 def add(text, scenario="closing"):
@@ -69,19 +70,21 @@ CASES = {  # name: (mutation, expected error codes, expected warning codes)
                                  add("<if when=\"segment EQUALS 'gold'\">Thank them.</if>")(c)), {"FE_VARIABLE_PRUNED"}, set()),
     "duplicate interrupt target": (put(["global_transitions", "stop_calling", "go_to"], "callback"), {"DUPLICATE_GLOBAL_TARGET"}, {"UNREACHABLE_SCENARIO"}),
     "primary not first": (put(["global_transitions", "callback_request", "filler"], EN_HI.split("</text>")[1] + "</text>" + EN_HI.split("</text>")[0] + "</text>"), set(), {"PRIMARY_NOT_FIRST"}),
+    "version 2 present": (put(["version"], 2), set(), set()),
+    "wrong version": (put(["version"], 1), {"SCHEMA_INVALID"}, set()),
     "say-only closing": (put(["scenarios", "wrong_person"], "<say>" + EN_HI + "</say>"), set(), {"LINT_SAY_ONLY"}),
     "stop word": (add('<say><text lang="en-IN"><male>Note: hi</male><female>Note: hi</female></text><text lang="hi-IN"><male>हाय</male><female>हाय</female></text></say>'), set(), {"LINT_STOP_WORD"}),
 }
 
 
 def main():
-    cfg = BOT["scenario_config"]
-    rep = validate(cfg, LANGS, TOOLS, BOT["initial_message"])
+    cfg = CONFIG
+    rep = validate(cfg, LANGS, TOOLS, GREETING)
     failures = [f"example not clean: {rep.errors + rep.warnings}"] if rep.errors or rep.warnings else []
     for name, (mutate, want_errors, want_warnings) in CASES.items():
         c = copy.deepcopy(cfg)
         mutate(c)
-        rep = validate(c, LANGS, TOOLS, BOT["initial_message"])
+        rep = validate(c, LANGS, TOOLS, GREETING)
         got = ({e[0] for e in rep.errors}, {w[0] for w in rep.warnings})
         if got != (want_errors, want_warnings):
             failures.append(f"{name}: want {want_errors} {want_warnings}, got {got[0]} {got[1]}")

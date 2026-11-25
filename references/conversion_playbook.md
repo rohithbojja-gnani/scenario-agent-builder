@@ -16,7 +16,8 @@ the save-time validator. Keep every customer-facing scripted line word for word 
   lines).
 - **The greeting**: the source's first line becomes the bot's greeting (`initial_message`), played without the
   model before any scenario runs. The `start` scenario answers the caller's reply to it and never greets again.
-  The greeting may use only `system`/`user_defined` variables; it carries the AI disclosure.
+  The greeting may use only `system`/`user_defined` variables; it carries the AI disclosure. It is a bot field,
+  not part of the scenario JSON: give it as one line after the JSON when it changes.
 
 ### A2. Cut the spine into scenarios by conversational job
 
